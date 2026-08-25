@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import PostgresDsn
+from pydantic import PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     database_url: PostgresDsn
     test_database_url: PostgresDsn
+    amap_web_api_key: SecretStr | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

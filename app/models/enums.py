@@ -13,3 +13,13 @@ class VehicleEnergyType(str, Enum):
 
     GASOLINE = "gasoline"
     ELECTRIC = "electric"
+
+
+class RouteSegmentMode(str, Enum):
+    """Concrete travel modes that may occur inside a route."""
+
+    DRIVING = "driving"
+    WALKING = "walking"
+    BUS = "bus"
+    SUBWAY = "subway"
+    RAILWAY = "railway"

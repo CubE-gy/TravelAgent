@@ -12,6 +12,7 @@ def test_settings_accept_explicit_database_url() -> None:
     )
 
     assert settings.app_env == "development"
+    assert settings.amap_web_api_key is None
     assert str(settings.database_url) == (
         "postgresql+psycopg://user:password@localhost:5432/travel_agent"
     )
@@ -27,10 +28,13 @@ def test_settings_reads_environment_variables(monkeypatch: pytest.MonkeyPatch) -
         "TEST_DATABASE_URL",
         "postgresql+psycopg://user:password@localhost:5433/travel_agent_test",
     )
+    monkeypatch.setenv("AMAP_WEB_API_KEY", "test-amap-key")
 
     settings = Settings(_env_file=None)
 
     assert settings.app_env == "test"
+    assert settings.amap_web_api_key is not None
+    assert settings.amap_web_api_key.get_secret_value() == "test-amap-key"
 
 
 def test_settings_loads_dotenv_file(tmp_path) -> None:

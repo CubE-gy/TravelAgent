@@ -2,7 +2,7 @@
 
 TravelAgent V1 是一个旅行路线规划 Agent。它面向已经有目的地、酒店、景点或交通意向的用户，逐步整合旅行信息，并基于真实地图事实生成、展示和调整可执行路线。
 
-当前仓库处于 **Stage 0：后端工程骨架 + 数据持久化地基**。现有代码提供 FastAPI 服务、PostgreSQL 开发/测试数据库、Alembic 迁移、Trip 最小 API 和自动测试；尚未接入前端、高德地图、LLM 或生产部署。
+当前已完成 **Stage 1：高德地图事实层工程化**。项目在 Stage 0 的 FastAPI、PostgreSQL、Alembic 和 Trip 最小 API 地基之上，增加了可测试、可替换的高德 Web API 地图事实服务；尚未接入 LLM、行程编排、正式前端地图或生产部署。
 
 ## 当前能力
 
@@ -14,6 +14,10 @@ TravelAgent V1 是一个旅行路线规划 Agent。它面向已经有目的地�
 - 使用独立的 PostgreSQL 开发库与测试库。
 - 使用 Alembic 管理数据库表结构版本。
 - 使用 pytest 覆盖配置、模型、API、数据库连接、迁移和真实持久化流程。
+- 通过 `AmapApiService` 提供统一的地图事实入口：POI 搜索、标准地点确认、周边 POI、加油站、充电站、驾车路线和同城市内公共交通路线。
+- 将高德 V5 原始响应转换为项目内部 `PoiCandidate`、`ResolvedLocation`、`Route`、`RouteSegment` 与 `Polyline` 模型。
+- 将 Key 缺失、超时、调用限额、上游异常、无结果等情况转换为可预测的项目内部错误；不会记录 API Key 或原始响应正文。
+- 支持驾车、步行、公交、地铁、铁路分段及其可用的 Polyline；不对路线做业务决策。
 
 ## 技术栈
 
@@ -44,6 +48,8 @@ Copy-Item .env.example .env
 ```
 
 编辑 `.env`，为开发库和测试库设置密码。`TRAVEL_AGENT_DEV_DB_PASSWORD`、`TRAVEL_AGENT_TEST_DB_PASSWORD` 必须分别与 `DATABASE_URL`、`TEST_DATABASE_URL` 中的密码保持一致。
+
+如需调用真实高德服务或运行地图 Smoke Test，再设置 `AMAP_WEB_API_KEY`。该 Key 必须在高德控制台创建为“Web服务”类型。
 
 `.env` 包含本地密钥和密码，已被 `.gitignore` 排除，不要提交到 Git。
 
@@ -105,6 +111,29 @@ Invoke-RestMethod `
 
 `POST /trips` 成功时返回 `201 Created`。不存在的 Trip 返回 `404`；空名称、空更新或无效日期范围返回 `422`。
 
+## 地图事实服务
+
+Stage 1 不新增地图 FastAPI 路由。上层 Python 业务通过 `AmapApiService` 取得已经标准化的地图事实，而不读取高德原始 JSON：
+
+```python
+from app.core.config import Settings
+from app.services import AmapApiService
+
+map_service = AmapApiService(Settings().amap_web_api_key)
+candidates = map_service.search_pois("天安门", region="北京")
+origin = map_service.resolve_location(candidates[0].poi_id)
+
+destination_candidates = map_service.search_pois("故宫博物院", region="北京")
+destination = map_service.resolve_location(destination_candidates[0].poi_id)
+
+driving_route = map_service.get_driving_route(origin, destination)
+public_transport_route = map_service.get_local_public_transport_route(
+    origin, destination
+)
+```
+
+市内公共交通要求起点和终点都有相同的高德 `city_code`。这只用于确认请求属于同一城市，并不替代后续阶段的城际/市内业务决策。
+
 ## 自动测试
 
 默认命令运行不依赖 PostgreSQL 的测试：
@@ -127,6 +156,14 @@ Invoke-RestMethod `
 
 集成测试会连接 `.env` 中的开发库和测试库，执行 Alembic 迁移，并验证 Trip 的创建、读取、更新和 PostgreSQL 真实持久化。
 
+高德真实 Smoke Test 默认不会运行，以避免意外消耗配额。设置 `AMAP_WEB_API_KEY` 后可显式执行：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -o addopts="" -m amap_smoke
+```
+
+该测试会用少量真实 V5 请求验证 POI 搜索、地点确认、驾车路线和市内公共交通路线。无 Key 时跳过；不会输出 Key 或响应正文。
+
 ## 项目结构
 
 ```text
@@ -138,6 +175,7 @@ TravelAgent/
 │   ├── models/          # 数据库模型与枚举
 │   ├── repositories/    # 数据访问操作
 │   ├── schemas/         # Pydantic 输入/输出模型
+│   ├── services/        # 地图事实服务与高德 Web API 封装
 │   └── main.py          # FastAPI 应用入口
 ├── migrations/          # Alembic 迁移脚本
 ├── tests/               # 单元测试与 PostgreSQL 集成测试
