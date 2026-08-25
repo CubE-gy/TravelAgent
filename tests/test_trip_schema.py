@@ -44,3 +44,9 @@ def test_trip_update_normalizes_name() -> None:
     trip_update = TripUpdate(name="  更新后的旅行  ")
 
     assert trip_update.name == "更新后的旅行"
+
+
+@pytest.mark.parametrize("field_name", ["name", "start_date", "end_date"])
+def test_trip_update_rejects_explicit_null(field_name: str) -> None:
+    with pytest.raises(ValidationError, match=f"{field_name} must not be null"):
+        TripUpdate(**{field_name: None})

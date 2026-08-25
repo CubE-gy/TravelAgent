@@ -73,6 +73,10 @@ def test_create_trip_persists_data_in_test_database() -> None:
                 f"/trips/{uuid4()}",
                 json={"name": "不存在的旅行"},
             )
+            null_update_responses = [
+                client.patch(f"/trips/{created_trip['id']}", json={field_name: None})
+                for field_name in ("name", "start_date", "end_date")
+            ]
             updated_get_response = client.get(f"/trips/{created_trip['id']}")
 
         assert update_response.status_code == 200
@@ -85,6 +89,7 @@ def test_create_trip_persists_data_in_test_database() -> None:
         }
         assert missing_update_response.status_code == 404
         assert missing_update_response.json() == {"detail": "Trip not found"}
+        assert all(response.status_code == 422 for response in null_update_responses)
         assert updated_get_response.status_code == 200
         assert updated_get_response.json() == updated_trip
 

@@ -60,4 +60,11 @@ class TripUpdate(BaseModel):
     def update_must_contain_at_least_one_field(self) -> "TripUpdate":
         if not self.model_fields_set:
             raise ValueError("at least one field must be provided")
+        null_fields = [
+            field_name
+            for field_name in self.model_fields_set
+            if getattr(self, field_name) is None
+        ]
+        if null_fields:
+            raise ValueError(f"{', '.join(sorted(null_fields))} must not be null")
         return self
