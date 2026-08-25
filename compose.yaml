@@ -1,0 +1,36 @@
+services:
+  postgres-dev:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: travel_agent_dev
+      POSTGRES_USER: travel_agent_dev
+      POSTGRES_PASSWORD: ${TRAVEL_AGENT_DEV_DB_PASSWORD:?Set TRAVEL_AGENT_DEV_DB_PASSWORD in .env}
+    ports:
+      - "5434:5432"
+    volumes:
+      - travel_agent_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U travel_agent_dev -d travel_agent_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-test:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: travel_agent_test
+      POSTGRES_USER: travel_agent_test
+      POSTGRES_PASSWORD: ${TRAVEL_AGENT_TEST_DB_PASSWORD:?Set TRAVEL_AGENT_TEST_DB_PASSWORD in .env}
+    ports:
+      - "5435:5432"
+    volumes:
+      - travel_agent_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U travel_agent_test -d travel_agent_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  travel_agent_dev_data:
+  travel_agent_test_data:
