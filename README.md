@@ -16,7 +16,7 @@ TravelAgent V1 是一个旅行路线规划 Agent。它面向已经有目的地�
 - 使用 pytest 覆盖配置、模型、API、数据库连接、迁移和真实持久化流程。
 - 通过 `AmapApiService` 提供统一的地图事实入口：POI 搜索、标准地点确认、周边 POI、加油站、充电站、驾车路线和同城市内公共交通路线。
 - 将高德 V5 原始响应转换为项目内部 `PoiCandidate`、`ResolvedLocation`、`Route`、`RouteSegment` 与 `Polyline` 模型。
-- 将 Key 缺失、超时、调用限额、上游异常、无结果等情况转换为可预测的项目内部错误；不会记录 API Key 或原始响应正文。
+- 将 Key 缺失、超时、HTTP `429` 或高德配额/限流 `infocode`、上游异常、无结果等情况转换为可预测的项目内部错误；不会记录 API Key 或原始响应正文。
 - 支持驾车、步行、公交、地铁、铁路分段及其可用的 Polyline；不对路线做业务决策。
 
 ## 技术栈

@@ -57,6 +57,41 @@ def test_get_json_converts_rate_limits() -> None:
         client.get_json("v5/place/text")
 
 
+@pytest.mark.parametrize(
+    "infocode",
+    [
+        "10003",
+        "10004",
+        "10014",
+        "10019",
+        "10020",
+        "10021",
+        "10044",
+    ],
+)
+def test_get_json_converts_amap_quota_infocodes(infocode: str) -> None:
+    client = make_client(
+        lambda request: httpx.Response(
+            200,
+            json={"status": "0", "infocode": infocode, "info": "limit exceeded"},
+        )
+    )
+
+    with pytest.raises(MapQuotaExceededError):
+        client.get_json("v5/place/text")
+
+
+def test_get_json_keeps_non_quota_amap_errors_for_service_level_conversion() -> None:
+    payload = make_client(
+        lambda request: httpx.Response(
+            200,
+            json={"status": "0", "infocode": "10001", "info": "invalid key"},
+        )
+    ).get_json("v5/place/text")
+
+    assert payload["infocode"] == "10001"
+
+
 def test_get_json_converts_unsuccessful_http_responses() -> None:
     client = make_client(lambda request: httpx.Response(500))
 

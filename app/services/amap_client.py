@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 from pydantic import SecretStr
@@ -16,6 +16,21 @@ class AmapWebApiClient:
     """Low-level, safe HTTP client for Amap Web API requests."""
 
     base_url = "https://restapi.amap.com"
+    quota_infocodes: ClassVar[frozenset[str]] = frozenset(
+        {
+            "10003",  # DAILY_QUERY_OVER_LIMIT
+            "10004",  # ACCESS_TOO_FREQUENT
+            "10010",  # IP_QUERY_OVER_LIMIT
+            "10014",  # QPS_HAS_EXCEEDED_THE_LIMIT
+            "10015",  # QPS limit at the gateway
+            "10019",  # CQPS_HAS_EXCEEDED_THE_LIMIT
+            "10020",  # CKQPS_HAS_EXCEEDED_THE_LIMIT
+            "10021",  # CUQPS_HAS_EXCEEDED_THE_LIMIT
+            "10029",  # ABROAD_DAILY_QUERY_OVER_LIMIT
+            "10044",  # USER_DAILY_QUERY_OVER_LIMIT
+            "10045",  # USER_ABROAD_DAILY_QUERY_OVER_LIMIT
+        }
+    )
 
     def __init__(
         self,
@@ -58,6 +73,8 @@ class AmapWebApiClient:
 
         if not isinstance(payload, dict):
             raise MapUpstreamError()
+        if payload.get("infocode") in self.quota_infocodes:
+            raise MapQuotaExceededError()
         return payload
 
     def _get_api_key(self) -> str:
