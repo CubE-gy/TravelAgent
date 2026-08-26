@@ -8,6 +8,15 @@ class TravelMode(str, Enum):
     DRIVING = "driving"
 
 
+class IntercityTravelMode(str, Enum):
+    """Concrete city-to-city travel modes supported by TravelAgent V1."""
+
+    DRIVING = "driving"
+    HIGH_SPEED_RAIL = "high_speed_rail"
+    TRAIN = "train"
+    FLIGHT = "flight"
+
+
 class VehicleEnergyType(str, Enum):
     """Vehicle energy types currently supported by TravelAgent V1."""
 

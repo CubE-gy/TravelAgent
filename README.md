@@ -2,7 +2,7 @@
 
 TravelAgent V1 是一个旅行路线规划 Agent。它面向已经有目的地、酒店、景点或交通意向的用户，逐步整合旅行信息，并基于真实地图事实生成、展示和调整可执行路线。
 
-当前已完成 **Stage 1：高德地图事实层工程化**。项目在 Stage 0 的 FastAPI、PostgreSQL、Alembic 和 Trip 最小 API 地基之上，增加了可测试、可替换的高德 Web API 地图事实服务；尚未接入 LLM、行程编排、正式前端地图或生产部署。
+当前已完成 **Stage 2：多轮需求理解 + Trip State Agent**。项目在 Stage 0 的 FastAPI、PostgreSQL、Alembic 和 Trip 最小 API 地基，以及 Stage 1 的高德地图事实服务之上，支持将自然语言需求持续合并为可持久化的 `TripState`，并对缺失信息生成补问；尚未进入门到门公共交通路线、多日规划、补能规划、正式前端地图或生产部署。
 
 ## 当前能力
 
@@ -10,6 +10,9 @@ TravelAgent V1 是一个旅行路线规划 Agent。它面向已经有目的地�
 - `POST /trips`：创建并持久化一趟旅行。
 - `GET /trips/{trip_id}`：读取指定旅行。
 - `PATCH /trips/{trip_id}`：修改旅行名称或日期。
+- `POST /trips/conversations`：通过首条自然语言消息创建 Trip 与 `TripState`。
+- `POST /trips/{trip_id}/messages`：向既有 Trip 发送一条自然语言补充或修改消息。
+- `POST /trips/{trip_id}/locations/confirm`：确认此前返回的一个歧义地点候选。
 - 校验旅行名称、日期范围、地点坐标和车辆基础数据。
 - 使用独立的 PostgreSQL 开发库与测试库。
 - 使用 Alembic 管理数据库表结构版本。
@@ -18,6 +21,13 @@ TravelAgent V1 是一个旅行路线规划 Agent。它面向已经有目的地�
 - 将高德 V5 原始响应转换为项目内部 `PoiCandidate`、`ResolvedLocation`、`Route`、`RouteSegment` 与 `Polyline` 模型。
 - 将 Key 缺失、超时、HTTP `429` 或高德配额/限流 `infocode`、上游异常、无结果等情况转换为可预测的项目内部错误；不会记录 API Key 或原始响应正文。
 - 支持驾车、步行、公交、地铁、铁路分段及其可用的 Polyline；不对路线做业务决策。
+- 使用 LLM 将每条自然语言消息提取为显式的 `TripState` 增量，并只修改用户本轮明确提及的字段。
+- 持久化出发地、目的地、返程地、日期、住宿、景点、城际/市内交通和车辆等 `TripState` 信息；未提及字段会继续保留。
+- 对地点执行高德标准化：成功时保存确认地点，歧义时返回候选项供用户确认，地图查询失败时保留原始输入并返回可理解的失败信息。
+- 由 Python 确定缺失字段与地点确认需求，再由 LLM 生成简洁中文补问；LLM 的补问结果与需求不一致会被拒绝。
+- 一次对话的状态更新、日期投影与补问生成以同一事务处理；补问或上游调用失败时回滚，避免出现失败响应却已保存状态的情况。
+- `TripState` 是规划日期的唯一事实来源；`Trip.start_date/end_date` 是兼容 Stage 0 API 的镜像字段，日期 PATCH 会在同一事务中同步两者。
+- LLM 配置缺失返回安全的 `503 Service Unavailable` 响应，不向客户端泄露 Key、模型名或上游配置细节。
 
 ## 技术栈
 
@@ -111,6 +121,24 @@ Invoke-RestMethod `
 
 `POST /trips` 成功时返回 `201 Created`。不存在的 Trip 返回 `404`；空名称、空更新或无效日期范围返回 `422`。
 
+### 通过对话创建和更新 TripState
+
+```powershell
+$conversation = Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/trips/conversations `
+  -ContentType "application/json" `
+  -Body '{"message":"2026年10月1日从南京去北京，3日回南京，住王府井附近，想去故宫，坐高铁。"}'
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/trips/$($conversation.trip.id)/messages" `
+  -ContentType "application/json" `
+  -Body '{"message":"酒店改到国贸附近，城际改坐飞机，景点只保留故宫。"}'
+```
+
+响应包含当前 `state`、地点解析失败信息、完整性 `assessment` 与下一轮 `clarification`。当地点存在多个候选项时，使用 `POST /trips/{trip_id}/locations/confirm` 提交候选 `poi_id`，而不是让系统重新猜测地点。
+
 ## 地图事实服务
 
 Stage 1 不新增地图 FastAPI 路由。上层 Python 业务通过 `AmapApiService` 取得已经标准化的地图事实，而不读取高德原始 JSON：
@@ -154,7 +182,7 @@ public_transport_route = map_service.get_local_public_transport_route(
 .\.venv\Scripts\python.exe -m pytest -o addopts=""
 ```
 
-集成测试会连接 `.env` 中的开发库和测试库，执行 Alembic 迁移，并验证 Trip 的创建、读取、更新和 PostgreSQL 真实持久化。
+集成测试会连接 `.env` 中的开发库和测试库，执行 Alembic 迁移，并验证 Trip 与 TripState 的创建、读取、日期同步、事务回滚、地点确认和 PostgreSQL 真实持久化。
 
 高德真实 Smoke Test 默认不会运行，以避免意外消耗配额。设置 `AMAP_WEB_API_KEY` 后可显式执行：
 
@@ -163,6 +191,14 @@ public_transport_route = map_service.get_local_public_transport_route(
 ```
 
 该测试会用少量真实 V5 请求验证 POI 搜索、地点确认、驾车路线和市内公共交通路线。无 Key 时跳过；不会输出 Key 或响应正文。
+
+真实 LLM 验收同样是显式执行的：在 `.env` 设置 `LLM_PROVIDER=real`、`LLM_API_KEY`、`LLM_MODEL`（可选修改 `LLM_BASE_URL`）后运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -o addopts="" -m llm_smoke
+```
+
+该 Smoke Test 会把真实中文旅行描述交给已配置的 OpenAI-compatible Provider，并验证首次结构化提取，以及对已有状态的组合纠正（更换酒店、改城际交通、删除景点且保留未提及字段）。未设置真实 Provider 凭据时会跳过，且不会输出密钥。
 
 ## 项目结构
 

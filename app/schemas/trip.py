@@ -32,9 +32,9 @@ class TripRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    name: str
-    start_date: date
-    end_date: date
+    name: str | None
+    start_date: date | None
+    end_date: date | None
     created_at: datetime
     updated_at: datetime
 

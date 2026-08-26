@@ -27,8 +27,9 @@ testpaths = ["tests"]
 markers = [
     "integration: requires local PostgreSQL containers configured through .env",
     "amap_smoke: makes a small number of real Amap Web API requests",
+    "llm_smoke: makes a real request to the configured OpenAI-compatible LLM Provider",
 ]
-addopts = "-m 'not integration and not amap_smoke'"
+addopts = "-m 'not integration and not amap_smoke and not llm_smoke'"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
