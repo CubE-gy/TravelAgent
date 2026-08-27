@@ -10,7 +10,7 @@ from app.db.session import create_database_engine
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0004_allow_empty_trip_metadata"
+HEAD_REVISION = "0005_create_trip_plans"
 
 
 def _alembic_config(database_url: str) -> Config:

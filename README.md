@@ -2,7 +2,7 @@
 
 TravelAgent V1 是一个旅行路线规划 Agent。它面向已经有目的地、酒店、景点或交通意向的用户，逐步整合旅行信息，并基于真实地图事实生成、展示和调整可执行路线。
 
-当前已完成 **Stage 2：多轮需求理解 + Trip State Agent**。项目在 Stage 0 的 FastAPI、PostgreSQL、Alembic 和 Trip 最小 API 地基，以及 Stage 1 的高德地图事实服务之上，支持将自然语言需求持续合并为可持久化的 `TripState`，并对缺失信息生成补问；尚未进入门到门公共交通路线、多日规划、补能规划、正式前端地图或生产部署。
+当前已完成 **Stage 3：门到门公共交通完整闭环**。项目在前述工程、地图事实服务和可持久化 `TripState` 基础上，能够根据已确认的地点、用户确认的城际事实和真实高德市内公共交通路线，生成并保存完整的门到门公共交通计划；尚未进入多日地点自动规划、补能规划、正式前端地图或生产部署。
 
 ## 当前能力
 
@@ -13,6 +13,8 @@ TravelAgent V1 是一个旅行路线规划 Agent。它面向已经有目的地�
 - `POST /trips/conversations`：通过首条自然语言消息创建 Trip 与 `TripState`。
 - `POST /trips/{trip_id}/messages`：向既有 Trip 发送一条自然语言补充或修改消息。
 - `POST /trips/{trip_id}/locations/confirm`：确认此前返回的一个歧义地点候选。
+- `POST /trips/{trip_id}/public-transport-plan`：生成并保存一份完整的门到门公共交通计划。
+- `GET /trips/{trip_id}/public-transport-plan`：读取已保存的公共交通计划，不重新查询路线。
 - 校验旅行名称、日期范围、地点坐标和车辆基础数据。
 - 使用独立的 PostgreSQL 开发库与测试库。
 - 使用 Alembic 管理数据库表结构版本。
@@ -28,6 +30,9 @@ TravelAgent V1 是一个旅行路线规划 Agent。它面向已经有目的地�
 - 一次对话的状态更新、日期投影与补问生成以同一事务处理；补问或上游调用失败时回滚，避免出现失败响应却已保存状态的情况。
 - `TripState` 是规划日期的唯一事实来源；`Trip.start_date/end_date` 是兼容 Stage 0 API 的镜像字段，日期 PATCH 会在同一事务中同步两者。
 - LLM 配置缺失返回安全的 `503 Service Unavailable` 响应，不向客户端泄露 Key、模型名或上游配置细节。
+- 公共交通计划要求 `TripState` 的出发地、目的地、返程目的地、住宿、每日景点和日期均已确认；每日 `day_number` 必须落在出发日至返程日的范围内，但可保留没有景点的休息日。
+- 城际车站或机场请求只接收高德 `poi_id`，后端会通过 Stage 1 重新标准化地点；会校验出发地、目标城市、住宿、景点和返程节点的城市一致性。
+- 城际车次、时长等信息是用户确认的事实；本阶段不做实时查票、票价比较或交通方式推荐。任何一段市内路线没有结果时，不会保存半截计划。
 
 ## 技术栈
 
@@ -139,6 +144,37 @@ Invoke-RestMethod `
 
 响应包含当前 `state`、地点解析失败信息、完整性 `assessment` 与下一轮 `clarification`。当地点存在多个候选项时，使用 `POST /trips/{trip_id}/locations/confirm` 提交候选 `poi_id`，而不是让系统重新猜测地点。
 
+### 创建公共交通计划
+
+在 `TripState` 已完整且所有地点均已确认后，提交城际车站/机场的真实高德 POI ID、用户确认的城际事实，以及每天的已确认景点 POI ID：
+
+```powershell
+$plan = Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/trips/<trip_id>/public-transport-plan" `
+  -ContentType "application/json" `
+  -Body '{
+    "trip_id":"<trip_id>",
+    "outbound_intercity":{
+      "travel_mode":"high_speed_rail",
+      "departure_poi_id":"<outbound_departure_poi_id>",
+      "arrival_poi_id":"<outbound_arrival_poi_id>",
+      "fact":{"service_identifier":"<user_confirmed_service>","duration_seconds":7200}
+    },
+    "return_intercity":{
+      "travel_mode":"high_speed_rail",
+      "departure_poi_id":"<return_departure_poi_id>",
+      "arrival_poi_id":"<return_arrival_poi_id>",
+      "fact":{"service_identifier":"<user_confirmed_service>","duration_seconds":7200}
+    },
+    "daily_places":[{"day_number":1,"place_poi_ids":["<TripState_place_poi_id>"]}]
+  }'
+
+Invoke-RestMethod "http://127.0.0.1:8000/trips/<trip_id>/public-transport-plan"
+```
+
+成功时返回 `201 Created`。路径和 body 中的 `trip_id` 必须一致；城际 POI 会由后端重新解析，且所有市内路段必须能取得真实高德公共交通路线。违反日期、Day、城市一致性或地点确认要求时返回 `422`；Trip 或 TripState 不存在时分别返回 `404`、`409`。
+
 ## 地图事实服务
 
 Stage 1 不新增地图 FastAPI 路由。上层 Python 业务通过 `AmapApiService` 取得已经标准化的地图事实，而不读取高德原始 JSON：
@@ -191,6 +227,8 @@ public_transport_route = map_service.get_local_public_transport_route(
 ```
 
 该测试会用少量真实 V5 请求验证 POI 搜索、地点确认、驾车路线和市内公共交通路线。无 Key 时跳过；不会输出 Key 或响应正文。
+
+该命令还包含 Stage 3 的真实门到门公共交通 Smoke Test：它会检索和标准化真实 POI、生成完整路线骨架，并验证六段市内高德公共交通路线及两段用户确认的城际事实能够正确装配；不会查询实时票务或保存计划。
 
 真实 LLM 验收同样是显式执行的：在 `.env` 设置 `LLM_PROVIDER=real`、`LLM_API_KEY`、`LLM_MODEL`（可选修改 `LLM_BASE_URL`）后运行：
 
