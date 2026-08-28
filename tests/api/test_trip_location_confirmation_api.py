@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from app.api.trips import get_trip_state_location_confirmation_service
 from app.db.session import get_db
 from app.main import app
+from app.repositories.trip_state import TripStateRevisionConflictError
 from app.schemas.map import ResolvedLocation
 from app.schemas.trip_state import (
     LocationIntent,
@@ -15,13 +16,19 @@ from app.schemas.trip_state import (
     TripStateLocationField,
 )
 from app.schemas.trip_state_assessment import TripStateAssessment
-from app.services.map_errors import MapUpstreamError
+from app.services.map_errors import (
+    MapConfigurationError,
+    MapNoResultsError,
+    MapQuotaExceededError,
+    MapTimeoutError,
+    MapUpstreamError,
+)
 
 
 class FakeConfirmationService:
     def __init__(self, result: tuple[TripState, TripStateAssessment] | Exception) -> None:
         self._result = result
-        self.calls: list[tuple[object, UUID, object, str, int | None]] = []
+        self.calls: list[tuple[object, UUID, object, str, int | None, int]] = []
 
     def confirm(
         self,
@@ -31,8 +38,11 @@ class FakeConfirmationService:
         field: object,
         selected_poi_id: str,
         place_index: int | None,
+        expected_revision: int,
     ) -> tuple[TripState, TripStateAssessment]:
-        self.calls.append((session, trip_id, field, selected_poi_id, place_index))
+        self.calls.append(
+            (session, trip_id, field, selected_poi_id, place_index, expected_revision)
+        )
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
@@ -53,6 +63,7 @@ def client() -> Generator[TestClient, None, None]:
 def _result(trip_id: UUID) -> tuple[TripState, TripStateAssessment]:
     state = TripState(
         trip_id=trip_id,
+        revision=1,
         destination=LocationIntent(
             query="万达广场",
             resolution_status=LocationResolutionStatus.RESOLVED,
@@ -82,10 +93,12 @@ def test_confirm_trip_location_returns_confirmed_state(
 
     response = client.post(
         f"/trips/{trip_id}/locations/confirm",
-        json={"field": "destination", "poi_id": " B000A2 "},
+        json={"field": "destination", "poi_id": " B000A2 ", "expected_revision": 1},
     )
 
     assert response.status_code == 200
+    assert response.json()["revision"] == 1
+    assert response.json()["state"]["revision"] == 1
     assert response.json()["state"]["destination"]["resolution_status"] == "resolved"
     assert response.json()["state"]["destination"]["resolved_location"]["poi_id"] == "B000A2"
     assert service.calls[0][1:] == (
@@ -93,13 +106,14 @@ def test_confirm_trip_location_returns_confirmed_state(
         TripStateLocationField.DESTINATION,
         "B000A2",
         None,
+        1,
     )
 
 
 def test_confirm_trip_location_requires_valid_places_index(client: TestClient) -> None:
     response = client.post(
         f"/trips/{uuid4()}/locations/confirm",
-        json={"field": "places", "poi_id": "B000A2"},
+        json={"field": "places", "poi_id": "B000A2", "expected_revision": 1},
     )
 
     assert response.status_code == 422
@@ -114,7 +128,7 @@ def test_confirm_trip_location_stops_before_confirmation_for_unknown_trip(
 
     response = client.post(
         f"/trips/{uuid4()}/locations/confirm",
-        json={"field": "destination", "poi_id": "B000A2"},
+        json={"field": "destination", "poi_id": "B000A2", "expected_revision": 1},
     )
 
     assert response.status_code == 404
@@ -133,7 +147,7 @@ def test_confirm_trip_location_converts_invalid_selection_to_422(
 
     response = client.post(
         f"/trips/{trip_id}/locations/confirm",
-        json={"field": "destination", "poi_id": "B000MISSING"},
+        json={"field": "destination", "poi_id": "B000MISSING", "expected_revision": 1},
     )
 
     assert response.status_code == 422
@@ -142,18 +156,50 @@ def test_confirm_trip_location_converts_invalid_selection_to_422(
     }
 
 
-def test_confirm_trip_location_hides_map_failure_details(
+def test_confirm_trip_location_rejects_a_stale_revision(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     trip_id = uuid4()
-    service = FakeConfirmationService(MapUpstreamError())
+    service = FakeConfirmationService(
+        TripStateRevisionConflictError(expected_revision=1, current_revision=2)
+    )
     _override(service)
     monkeypatch.setattr("app.api.trips.get_trip_by_id", lambda session, identifier: object())
 
     response = client.post(
         f"/trips/{trip_id}/locations/confirm",
-        json={"field": "destination", "poi_id": "B000A2"},
+        json={"field": "destination", "poi_id": "B000A2", "expected_revision": 1},
     )
 
-    assert response.status_code == 502
+    assert response.status_code == 409
+    assert response.json() == {"detail": "TripState revision is stale"}
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        (MapNoResultsError(), 422),
+        (MapTimeoutError(), 504),
+        (MapConfigurationError(), 503),
+        (MapQuotaExceededError(), 503),
+        (MapUpstreamError(), 502),
+    ],
+)
+def test_confirm_trip_location_hides_map_failure_details(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    expected_status: int,
+) -> None:
+    trip_id = uuid4()
+    service = FakeConfirmationService(error)
+    _override(service)
+    monkeypatch.setattr("app.api.trips.get_trip_by_id", lambda session, identifier: object())
+
+    response = client.post(
+        f"/trips/{trip_id}/locations/confirm",
+        json={"field": "destination", "poi_id": "B000A2", "expected_revision": 1},
+    )
+
+    assert response.status_code == expected_status
     assert response.json() == {"detail": "Location confirmation could not be completed"}

@@ -10,7 +10,10 @@ from app.services.trip_state_location_resolution_service import (
     LocationResolutionFailure,
     TripStateLocationResolutionResult,
 )
-from app.services.trip_state_update_service import TripStateUpdateService
+from app.services.trip_state_update_service import (
+    TripStateLocationConfirmer,
+    TripStateUpdateService,
+)
 from app.services.trip_state_extraction_service import (
     LocationConfirmationIntent,
     TripStateMessageUnderstanding,
@@ -62,10 +65,14 @@ class FakeExtractor:
 class FakeLocationConfirmer:
     def __init__(self, result: TripState) -> None:
         self.result = result
-        self.calls: list[tuple[TripState, object, str, int | None]] = []
+        self.calls: list[tuple[TripState, TripStateLocationField, str, int | None]] = []
 
     def apply(
-        self, state: TripState, field: object, selected_poi_id: str, place_index: int | None = None
+        self,
+        state: TripState,
+        field: TripStateLocationField,
+        selected_poi_id: str,
+        place_index: int | None = None,
     ) -> TripState:
         self.calls.append((state, field, selected_poi_id, place_index))
         return self.result
@@ -84,9 +91,13 @@ class FakeLocationResolver:
 class FakeSession:
     def __init__(self) -> None:
         self.commit_calls = 0
+        self.rollback_calls = 0
 
     def commit(self) -> None:
         self.commit_calls += 1
+
+    def rollback(self) -> None:
+        self.rollback_calls += 1
 
 
 class FakeTrip:
@@ -143,7 +154,7 @@ def test_update_extracts_merges_normalizes_and_saves_existing_state(
     )
 
     result = TripStateUpdateService(extractor, resolver).update(
-        FakeSession(), trip_id, "酒店改到国贸附近"
+        FakeSession(), trip_id, "酒店改到国贸附近", expected_revision=0
     )
 
     assert extractor.calls == [(existing_state, "酒店改到国贸附近")]
@@ -190,7 +201,7 @@ def test_first_update_saves_location_failures_with_the_original_unresolved_locat
     )
 
     result = TripStateUpdateService(extractor, resolver).update(
-        FakeSession(), trip_id, "去不存在的城市"
+        FakeSession(), trip_id, "去不存在的城市", expected_revision=0
     )
 
     assert resolver.calls == [unresolved_state]
@@ -224,11 +235,36 @@ def test_update_marks_a_complete_confirmed_state_ready(monkeypatch: pytest.Monke
         lambda session, state, **kwargs: state,
     )
 
-    result = TripStateUpdateService(extractor, resolver).update(FakeSession(), trip_id, "继续")
+    result = TripStateUpdateService(extractor, resolver).update(
+        FakeSession(), trip_id, "继续", expected_revision=0
+    )
 
     assert result.assessment.is_ready is True
     assert result.assessment.missing_fields == []
     assert result.assessment.pending_locations == []
+
+
+def test_update_returns_the_incremented_persisted_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trip_id = uuid4()
+    current_state = TripState(trip_id=trip_id, revision=1)
+    extractor = FakeExtractor(TripStateMessageUnderstanding())
+    resolver = FakeLocationResolver(TripStateLocationResolutionResult(current_state, []))
+    monkeypatch.setattr(
+        "app.services.trip_state_update_service.get_trip_state",
+        lambda session, requested_trip_id: current_state,
+    )
+    monkeypatch.setattr(
+        "app.services.trip_state_update_service.save_trip_state",
+        lambda session, state, **kwargs: state.model_copy(update={"revision": 2}),
+    )
+
+    result = TripStateUpdateService(extractor, resolver).update(
+        FakeSession(), trip_id, "继续", expected_revision=1
+    )
+
+    assert result.state.revision == 2
 
 
 def test_transport_change_clears_vehicle_then_resolves_and_saves_existing_state(
@@ -260,7 +296,9 @@ def test_transport_change_clears_vehicle_then_resolves_and_saves_existing_state(
         lambda session, state, **kwargs: saved_states.append(state) or state,
     )
 
-    result = TripStateUpdateService(extractor, resolver).update(FakeSession(), trip_id, "改坐高铁")
+    result = TripStateUpdateService(extractor, resolver).update(
+        FakeSession(), trip_id, "改坐高铁", expected_revision=0
+    )
 
     assert resolver.calls[0].intercity_travel_mode is IntercityTravelMode.HIGH_SPEED_RAIL
     assert resolver.calls[0].vehicle is None
@@ -307,11 +345,17 @@ def test_update_confirms_an_existing_candidate_then_merges_other_explicit_change
     monkeypatch.setattr("app.services.trip_state_update_service.get_trip_state", lambda session, requested_trip_id: ambiguous_state)
     monkeypatch.setattr("app.services.trip_state_update_service.save_trip_state", lambda session, state, **kwargs: state)
 
-    result = TripStateUpdateService(extractor, resolver, confirmer).update(FakeSession(), trip_id, "选北京那个，坐公交")
+    result = TripStateUpdateService(extractor, resolver, confirmer).update(
+        FakeSession(), trip_id, "选北京那个，坐公交", expected_revision=0
+    )
 
     assert confirmer.calls[0][1:] == (TripStateLocationField.DESTINATION, "B1", None)
     assert resolver.calls == [confirmed_state]
     assert result.state == confirmed_state
+
+
+def test_location_confirmer_contract_uses_the_domain_location_field() -> None:
+    assert TripStateLocationConfirmer.apply.__annotations__["field"] is TripStateLocationField
 
 
 def test_extraction_error_does_not_resolve_or_save_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -329,8 +373,12 @@ def test_extraction_error_does_not_resolve_or_save_state(monkeypatch: pytest.Mon
         lambda session, state, **kwargs: saved_states.append(state) or state,
     )
 
+    session = FakeSession()
     with pytest.raises(RuntimeError, match="provider failed"):
-        TripStateUpdateService(extractor, resolver).update(FakeSession(), trip_id, "去北京")
+        TripStateUpdateService(extractor, resolver).update(
+            session, trip_id, "去北京", expected_revision=0
+        )
 
     assert resolver.calls == []
     assert saved_states == []
+    assert session.rollback_calls == 1

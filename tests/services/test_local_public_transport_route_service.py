@@ -114,7 +114,9 @@ def skeleton() -> TripRouteSkeleton:
     ]
     legs = [
         TripRouteSkeletonLeg(
-            kind=kind, origin_node_index=index, destination_node_index=index + 1
+                kind=kind,
+                origin_node_id=nodes[index].node_id,
+                destination_node_id=nodes[index + 1].node_id,
         )
         for index, kind in enumerate(kinds)
     ]
@@ -170,6 +172,7 @@ def test_resolve_rejects_missing_or_cross_city_local_leg_inputs(
 ) -> None:
     route_skeleton = skeleton()
     route_skeleton.nodes[1] = TripRouteNode(
+        node_id=route_skeleton.nodes[1].node_id,
         kind=TripRouteNodeKind.OUTBOUND_DEPARTURE_NODE,
         location=location("OUTBOUND_DEPARTURE", city_code),
     )

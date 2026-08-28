@@ -9,8 +9,8 @@ from app.core.config import Settings
 from app.db.session import create_database_engine
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0005_create_trip_plans"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+HEAD_REVISION = "0006_add_trip_state_revision"
 
 
 def _alembic_config(database_url: str) -> Config:
@@ -32,7 +32,16 @@ def test_migration_baseline_applies_to_each_database() -> None:
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
+                trip_state_revision_column_exists = connection.execute(
+                    text(
+                        "SELECT EXISTS ("
+                        "SELECT 1 FROM information_schema.columns "
+                        "WHERE table_name = 'trip_states' AND column_name = 'revision'"
+                        ")"
+                    )
+                ).scalar_one()
         finally:
             engine.dispose()
 
         assert revision == HEAD_REVISION
+        assert trip_state_revision_column_exists is True

@@ -7,7 +7,10 @@ from app.schemas.map import GeoPoint, ResolvedLocation, Route, RouteSegment
 from app.schemas.trip_public_transport_plan import PublicTransportPlanningRequest, TripRouteFactSource
 from app.schemas.trip_state import TripState
 from app.services.map_errors import MapTimeoutError
-from app.services.public_transport_trip_planning_service import PublicTransportTripPlanningService
+from app.services.public_transport_trip_planning_service import (
+    PublicTransportTripPlanningMapProvider,
+    PublicTransportTripPlanningService,
+)
 
 
 def resolved_intent(poi_id: str, name: str) -> dict[str, object]:
@@ -26,6 +29,7 @@ def resolved_intent(poi_id: str, name: str) -> dict[str, object]:
 def state(trip_id: object) -> TripState:
     return TripState(
         trip_id=trip_id,
+        revision=1,
         origin=resolved_intent("HOME", "家"),
         destination=resolved_intent("QINGDAO", "青岛"),
         return_destination=resolved_intent("HOME_RETURN", "返程终点"),
@@ -87,6 +91,10 @@ class FakeMapService:
         )
 
 
+def test_map_provider_contract_requires_only_node_resolution_and_local_routing() -> None:
+    assert isinstance(FakeMapService(), PublicTransportTripPlanningMapProvider)
+
+
 def test_plan_coordinates_complete_stage_three_flow() -> None:
     trip_id = uuid4()
     map_service = FakeMapService()
@@ -94,6 +102,7 @@ def test_plan_coordinates_complete_stage_three_flow() -> None:
     plan = PublicTransportTripPlanningService(map_service).plan(state(trip_id), request(trip_id))
 
     assert len(plan.legs) == 8
+    assert plan.source_state_revision == 1
     assert [leg.fact_source for leg in plan.legs] == [
         TripRouteFactSource.AMAP_LOCAL_PUBLIC_TRANSPORT,
         TripRouteFactSource.USER_CONFIRMED_INTERCITY,

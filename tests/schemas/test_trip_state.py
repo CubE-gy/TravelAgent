@@ -119,3 +119,11 @@ def test_trip_state_rejects_return_before_departure() -> None:
             departure_date="2026-10-03",
             return_date="2026-10-01",
         )
+
+
+def test_trip_state_revision_defaults_to_zero_and_cannot_be_negative() -> None:
+    state = TripState(trip_id=uuid4())
+
+    assert state.revision == 0
+    with pytest.raises(ValidationError):
+        TripState(trip_id=uuid4(), revision=-1)

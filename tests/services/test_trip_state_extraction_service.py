@@ -3,6 +3,11 @@ from uuid import uuid4
 import pytest
 
 from app.schemas.trip_state import TripState, TripStateLocationField, TripStatePatch
+from app.schemas.trip_state_operation import (
+    TripStateLocationConfirmationOperation,
+    TripStateOperationKind,
+    TripStatePatchOperation,
+)
 from app.services.llm_provider import LlmMessage, LlmProvider
 from app.services.trip_state_extraction_service import (
     LocationConfirmationIntent,
@@ -76,6 +81,26 @@ def test_extract_returns_empty_patch_when_provider_finds_no_explicit_change() ->
     assert understanding.location_confirmation is None
 
 
+def test_understanding_exposes_explicit_operations_in_deterministic_order() -> None:
+    understanding = TripStateMessageUnderstanding(
+        patch=TripStatePatch(accommodation={"query": "国贸附近"}),
+        location_confirmation=LocationConfirmationIntent(
+            field=TripStateLocationField.DESTINATION,
+            selected_poi_id="B1",
+        ),
+    )
+
+    operations = understanding.operations()
+
+    assert len(operations) == 2
+    assert isinstance(operations[0], TripStatePatchOperation)
+    assert operations[0].kind is TripStateOperationKind.APPLY_PATCH
+    assert operations[0].patch.accommodation is not None
+    assert isinstance(operations[1], TripStateLocationConfirmationOperation)
+    assert operations[1].kind is TripStateOperationKind.CONFIRM_LOCATION
+    assert operations[1].selected_poi_id == "B1"
+
+
 def test_extract_retries_when_explicit_trip_information_was_omitted() -> None:
     provider = SequentialPatchProvider(
         [
@@ -116,6 +141,21 @@ def test_strict_schema_uses_cleared_fields_for_explicit_removals() -> None:
 
     assert understanding.patch.model_fields_set == {"accommodation"}
     assert understanding.patch.accommodation is None
+
+
+def test_partial_patch_keeps_separately_declared_clears() -> None:
+    understanding = TripStateMessageUnderstanding(
+        patch=TripStatePatch(destination={"query": "上海"}),
+        cleared_fields=[TripStatePatchField.ACCOMMODATION],
+    )
+
+    operations = understanding.operations()
+
+    assert len(operations) == 1
+    assert isinstance(operations[0], TripStatePatchOperation)
+    assert operations[0].patch.model_fields_set == {"destination", "accommodation"}
+    assert operations[0].patch.destination is not None
+    assert operations[0].patch.accommodation is None
 
 
 def test_extract_does_not_replace_an_empty_llm_result_with_rule_based_facts() -> None:

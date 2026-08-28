@@ -2,11 +2,12 @@
 
 from datetime import datetime
 from enum import Enum
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.enums import IntercityTravelMode
+from app.schemas.base import ApiRequest
 from app.schemas.map import ResolvedLocation, Route
 
 
@@ -50,7 +51,7 @@ class TripRouteFactSource(str, Enum):
     USER_CONFIRMED_INTERCITY = "user_confirmed_intercity"
 
 
-class DailyPlacePlan(BaseModel):
+class DailyPlacePlan(ApiRequest):
     """A user-specified, ordered set of existing TripState places for one day."""
 
     day_number: int = Field(ge=1)
@@ -67,7 +68,7 @@ class DailyPlacePlan(BaseModel):
         return normalized_ids
 
 
-class IntercityPublicTransportLeg(BaseModel):
+class IntercityPublicTransportLeg(ApiRequest):
     """One user-confirmed intercity movement and its two transport nodes."""
 
     travel_mode: IntercityTravelMode
@@ -98,7 +99,7 @@ class ResolvedIntercityPublicTransportLeg(BaseModel):
     fact: "UserConfirmedIntercityTransportFact"
 
 
-class UserConfirmedIntercityTransportFact(BaseModel):
+class UserConfirmedIntercityTransportFact(ApiRequest):
     """A non-live intercity record supplied and confirmed by the user."""
 
     source: IntercityTransportFactSource = IntercityTransportFactSource.USER_CONFIRMED
@@ -129,7 +130,7 @@ class UserConfirmedIntercityTransportFact(BaseModel):
         return self
 
 
-class PublicTransportPlanningRequest(BaseModel):
+class PublicTransportPlanningRequest(ApiRequest):
     """Extra confirmed planning choices that complement, but do not duplicate, TripState."""
 
     trip_id: UUID
@@ -157,6 +158,7 @@ class ResolvedPublicTransportPlanningRequest(BaseModel):
 class TripRouteNode(BaseModel):
     """One resolved point in an assembled door-to-door route skeleton."""
 
+    node_id: UUID = Field(default_factory=uuid4)
     kind: TripRouteNodeKind
     location: ResolvedLocation
     day_number: int | None = Field(default=None, ge=1)
@@ -173,13 +175,14 @@ class TripRouteNode(BaseModel):
 class TripRouteSkeletonLeg(BaseModel):
     """One planned movement awaiting a later Stage 3 map-fact query."""
 
+    leg_id: UUID = Field(default_factory=uuid4)
     kind: TripRouteLegKind
-    origin_node_index: int = Field(ge=0)
-    destination_node_index: int = Field(ge=0)
+    origin_node_id: UUID
+    destination_node_id: UUID
 
     @model_validator(mode="after")
     def leg_nodes_must_be_distinct(self) -> "TripRouteSkeletonLeg":
-        if self.origin_node_index == self.destination_node_index:
+        if self.origin_node_id == self.destination_node_id:
             raise ValueError("route skeleton leg endpoints must be distinct")
         return self
 
@@ -193,13 +196,7 @@ class TripRouteSkeleton(BaseModel):
 
     @model_validator(mode="after")
     def legs_must_reference_existing_nodes(self) -> "TripRouteSkeleton":
-        last_node_index = len(self.nodes) - 1
-        for leg in self.legs:
-            if (
-                leg.origin_node_index > last_node_index
-                or leg.destination_node_index > last_node_index
-            ):
-                raise ValueError("route skeleton leg must reference an existing node")
+        _validate_route_graph(self.nodes, self.legs)
         return self
 
 
@@ -214,7 +211,10 @@ class LocalPublicTransportRouteFact(BaseModel):
 class PublicTransportTripPlanLeg(BaseModel):
     """One complete Trip-plan leg with an explicit, non-interchangeable fact source."""
 
+    leg_id: UUID = Field(default_factory=uuid4)
     kind: TripRouteLegKind
+    origin_node_id: UUID
+    destination_node_id: UUID
     origin: ResolvedLocation
     destination: ResolvedLocation
     fact_source: TripRouteFactSource
@@ -223,6 +223,8 @@ class PublicTransportTripPlanLeg(BaseModel):
 
     @model_validator(mode="after")
     def route_fact_must_match_leg_kind(self) -> "PublicTransportTripPlanLeg":
+        if self.origin_node_id == self.destination_node_id:
+            raise ValueError("plan leg endpoints must be distinct")
         is_intercity = self.kind in {
             TripRouteLegKind.OUTBOUND_INTERCITY,
             TripRouteLegKind.RETURN_INTERCITY,
@@ -247,5 +249,89 @@ class PublicTransportTripPlan(BaseModel):
     """A complete door-to-door public-transport plan in the original skeleton order."""
 
     trip_id: UUID
+    source_state_revision: int = Field(ge=1)
     nodes: list[TripRouteNode] = Field(min_length=2)
     legs: list[PublicTransportTripPlanLeg] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def legs_must_form_a_complete_route_graph(self) -> "PublicTransportTripPlan":
+        skeleton_legs = [
+            TripRouteSkeletonLeg(
+                leg_id=leg.leg_id,
+                kind=leg.kind,
+                origin_node_id=leg.origin_node_id,
+                destination_node_id=leg.destination_node_id,
+            )
+            for leg in self.legs
+        ]
+        _validate_route_graph(
+            self.nodes,
+            skeleton_legs,
+            require_terminal_nodes=True,
+            require_ordered_legs=True,
+        )
+        nodes_by_id = {node.node_id: node for node in self.nodes}
+        for leg in self.legs:
+            if leg.origin != nodes_by_id[leg.origin_node_id].location:
+                raise ValueError("plan leg origin must match its referenced node")
+            if leg.destination != nodes_by_id[leg.destination_node_id].location:
+                raise ValueError("plan leg destination must match its referenced node")
+        return self
+
+
+class PublicTransportTripPlanRead(PublicTransportTripPlan):
+    """A saved plan together with its derived freshness against current TripState."""
+
+    stale: bool
+
+
+def _validate_route_graph(
+    nodes: list[TripRouteNode],
+    legs: list[TripRouteSkeletonLeg],
+    *,
+    require_terminal_nodes: bool = False,
+    require_ordered_legs: bool = False,
+) -> None:
+    """Require one closed sequence from the route origin to its final destination."""
+    if len({node.node_id for node in nodes}) != len(nodes):
+        raise ValueError("route graph node_id values must be unique")
+    if len({leg.leg_id for leg in legs}) != len(legs):
+        raise ValueError("route graph leg_id values must be unique")
+    node_ids = {node.node_id for node in nodes}
+    outgoing: dict[UUID, UUID] = {}
+    incoming: dict[UUID, UUID] = {}
+    for leg in legs:
+        if leg.origin_node_id not in node_ids or leg.destination_node_id not in node_ids:
+            raise ValueError("route graph leg must reference an existing node")
+        if leg.origin_node_id in outgoing or leg.destination_node_id in incoming:
+            raise ValueError("route graph must not branch or merge")
+        outgoing[leg.origin_node_id] = leg.destination_node_id
+        incoming[leg.destination_node_id] = leg.origin_node_id
+
+    origins = [node.node_id for node in nodes if node.kind is TripRouteNodeKind.ORIGIN]
+    destinations = [
+        node.node_id for node in nodes if node.kind is TripRouteNodeKind.RETURN_DESTINATION
+    ]
+    if len(origins) != 1 or len(destinations) != 1:
+        if require_terminal_nodes:
+            raise ValueError(
+                "complete route graph requires exactly one origin and return destination"
+            )
+        return
+    if origins[0] in incoming or destinations[0] in outgoing:
+        raise ValueError("route graph endpoints have invalid incoming or outgoing legs")
+
+    visited = [origins[0]]
+    while visited[-1] in outgoing:
+        next_node_id = outgoing[visited[-1]]
+        if next_node_id in visited:
+            raise ValueError("route graph must not contain a cycle")
+        visited.append(next_node_id)
+    if visited[-1] != destinations[0] or set(visited) != node_ids or len(legs) != len(nodes) - 1:
+        raise ValueError("route graph must be one complete path from origin to return destination")
+    if require_ordered_legs:
+        if legs[0].origin_node_id != origins[0] or legs[-1].destination_node_id != destinations[0]:
+            raise ValueError("route graph legs must be ordered from origin to return destination")
+        for previous_leg, next_leg in zip(legs, legs[1:]):
+            if previous_leg.destination_node_id != next_leg.origin_node_id:
+                raise ValueError("route graph legs must be stored in continuous order")

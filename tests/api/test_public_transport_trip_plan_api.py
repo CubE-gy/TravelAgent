@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.api.trips import get_public_transport_trip_planning_service
+from app.repositories.trip_plan import TripPlanStateRevisionConflictError
 from app.core.config import Settings
 from app.db.session import create_database_engine
 from app.db.session import get_db
@@ -30,6 +31,7 @@ from app.repositories.trip_plan import get_trip_plan
 from app.repositories.trip_state import save_trip_state
 from app.schemas.trip import TripCreate
 from app.services.map_errors import (
+    MapConfigurationError,
     MapNoResultsError,
     MapQuotaExceededError,
     MapTimeoutError,
@@ -37,7 +39,7 @@ from app.services.map_errors import (
 )
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _upgrade_test_database(database_url: str) -> None:
@@ -89,16 +91,21 @@ def _location(poi_id: str) -> ResolvedLocation:
 
 def _plan(trip_id: UUID) -> PublicTransportTripPlan:
     origin = _location("HOME")
-    destination = _location("STATION")
+    destination = _location("RETURN_HOME")
+    origin_node = TripRouteNode(kind=TripRouteNodeKind.ORIGIN, location=origin)
+    destination_node = TripRouteNode(
+        kind=TripRouteNodeKind.RETURN_DESTINATION,
+        location=destination,
+    )
     return PublicTransportTripPlan(
         trip_id=trip_id,
-        nodes=[
-            TripRouteNode(kind=TripRouteNodeKind.ORIGIN, location=origin),
-            TripRouteNode(kind=TripRouteNodeKind.OUTBOUND_DEPARTURE_NODE, location=destination),
-        ],
+        source_state_revision=1,
+        nodes=[origin_node, destination_node],
         legs=[
             PublicTransportTripPlanLeg(
                 kind=TripRouteLegKind.TO_OUTBOUND_DEPARTURE_NODE,
+                origin_node_id=origin_node.node_id,
+                destination_node_id=destination_node.node_id,
                 origin=origin,
                 destination=destination,
                 fact_source=TripRouteFactSource.AMAP_LOCAL_PUBLIC_TRANSPORT,
@@ -144,10 +151,12 @@ def test_create_public_transport_plan_generates_saves_and_returns_plan(
     _override_planner(service)
     saved_plans: list[PublicTransportTripPlan] = []
     monkeypatch.setattr("app.api.trips.get_trip_by_id", lambda session, identifier: object())
-    monkeypatch.setattr("app.api.trips.get_trip_state", lambda session, identifier: TripState(trip_id=trip_id))
+    monkeypatch.setattr(
+        "app.api.trips.get_trip_state", lambda session, identifier: TripState(trip_id=trip_id, revision=1)
+    )
     monkeypatch.setattr(
         "app.api.trips.save_trip_plan",
-        lambda session, plan: saved_plans.append(plan) or plan,
+        lambda session, plan, **kwargs: saved_plans.append(plan) or plan,
     )
 
     response = client.post(
@@ -156,6 +165,7 @@ def test_create_public_transport_plan_generates_saves_and_returns_plan(
 
     assert response.status_code == 201
     assert response.json()["trip_id"] == str(trip_id)
+    assert response.json()["stale"] is False
     assert len(service.calls) == 1
     assert saved_plans == [expected_plan]
 
@@ -190,6 +200,7 @@ def test_create_public_transport_plan_rejects_missing_trip_or_state_before_plann
     [
         (MapNoResultsError(), 422, "No public transport route is available for this plan"),
         (MapTimeoutError(), 504, "Public transport route request timed out"),
+        (MapConfigurationError(), 503, "Public transport planning service is unavailable"),
         (MapQuotaExceededError(), 503, "Public transport planning service is unavailable"),
         (MapUpstreamError(), 502, "Public transport map service is unavailable"),
     ],
@@ -208,7 +219,7 @@ def test_create_public_transport_plan_maps_map_failures_without_saving(
     monkeypatch.setattr("app.api.trips.get_trip_by_id", lambda session, identifier: object())
     monkeypatch.setattr("app.api.trips.get_trip_state", lambda session, identifier: TripState(trip_id=trip_id))
     monkeypatch.setattr(
-        "app.api.trips.save_trip_plan", lambda session, plan: save_calls.append(plan) or plan
+        "app.api.trips.save_trip_plan", lambda session, plan, **kwargs: save_calls.append(plan) or plan
     )
 
     response = client.post(
@@ -218,6 +229,31 @@ def test_create_public_transport_plan_maps_map_failures_without_saving(
     assert response.status_code == expected_status
     assert response.json() == {"detail": expected_detail}
     assert save_calls == []
+
+
+def test_create_public_transport_plan_rejects_state_change_during_save(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trip_id = uuid4()
+    service = FakePlanningService(_plan(trip_id))
+    _override_planner(service)
+    monkeypatch.setattr("app.api.trips.get_trip_by_id", lambda session, identifier: object())
+    monkeypatch.setattr(
+        "app.api.trips.get_trip_state", lambda session, identifier: TripState(trip_id=trip_id, revision=1)
+    )
+    monkeypatch.setattr(
+        "app.api.trips.save_trip_plan",
+        lambda session, plan, **kwargs: (_ for _ in ()).throw(TripPlanStateRevisionConflictError()),
+    )
+
+    response = client.post(
+        f"/trips/{trip_id}/public-transport-plan", json=_request_payload(trip_id)
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "TripState changed while public transport plan was being generated"
+    }
 
 
 def test_create_public_transport_plan_rejects_path_and_payload_trip_id_mismatch(
@@ -245,12 +281,32 @@ def test_get_public_transport_plan_returns_saved_plan_without_planning(
     saved_plan = _plan(trip_id)
     monkeypatch.setattr("app.api.trips.get_trip_by_id", lambda session, identifier: object())
     monkeypatch.setattr("app.api.trips.get_trip_plan", lambda session, identifier: saved_plan)
+    monkeypatch.setattr(
+        "app.api.trips.get_trip_state", lambda session, identifier: TripState(trip_id=trip_id, revision=1)
+    )
 
     response = client.get(f"/trips/{trip_id}/public-transport-plan")
 
     assert response.status_code == 200
     assert response.json()["trip_id"] == str(trip_id)
+    assert response.json()["stale"] is False
     assert response.json()["legs"][0]["fact_source"] == "amap_local_public_transport"
+
+
+def test_get_public_transport_plan_marks_an_older_snapshot_stale(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trip_id = uuid4()
+    monkeypatch.setattr("app.api.trips.get_trip_by_id", lambda session, identifier: object())
+    monkeypatch.setattr("app.api.trips.get_trip_plan", lambda session, identifier: _plan(trip_id))
+    monkeypatch.setattr(
+        "app.api.trips.get_trip_state", lambda session, identifier: TripState(trip_id=trip_id, revision=2)
+    )
+
+    response = client.get(f"/trips/{trip_id}/public-transport-plan")
+
+    assert response.status_code == 200
+    assert response.json()["stale"] is True
 
 
 def test_get_public_transport_plan_rejects_unknown_trip_or_missing_plan(
@@ -290,9 +346,13 @@ def test_create_public_transport_plan_persists_the_generated_plan() -> None:
                 TripCreate(name="公共交通出行", start_date="2026-10-01", end_date="2026-10-02"),
             )
             trip_id = trip.id
-            save_trip_state(session, TripState(trip_id=trip.id))
+            save_trip_state(
+                session, TripState(trip_id=trip.id), expected_revision=0
+            )
+            session.commit()
 
-        service = FakePlanningService(_plan(trip_id))
+        expected_plan = _plan(trip_id)
+        service = FakePlanningService(expected_plan)
         _override_planner(service)
         with TestClient(app) as client:
             response = client.post(
@@ -304,7 +364,7 @@ def test_create_public_transport_plan_persists_the_generated_plan() -> None:
         assert get_response.status_code == 200
         assert get_response.json() == response.json()
         with Session(engine) as session:
-            assert get_trip_plan(session, trip_id) == _plan(trip_id)
+            assert get_trip_plan(session, trip_id) == expected_plan
     finally:
         app.dependency_overrides.clear()
         if trip_id is not None:

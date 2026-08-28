@@ -160,24 +160,22 @@ def test_intercity_public_transport_leg_requires_a_confirmed_fact() -> None:
 
 
 def test_trip_route_skeleton_keeps_node_and_leg_order_without_route_facts() -> None:
+    origin = TripRouteNode(
+        kind=TripRouteNodeKind.ORIGIN, location=resolved_location("HOME", "家")
+    )
+    place = TripRouteNode(
+        kind=TripRouteNodeKind.PLACE,
+        location=resolved_location("PLACE_A", "景点 A"),
+        day_number=1,
+    )
     skeleton = TripRouteSkeleton(
         trip_id=uuid4(),
-        nodes=[
-            TripRouteNode(
-                kind=TripRouteNodeKind.ORIGIN,
-                location=resolved_location("HOME", "家"),
-            ),
-            TripRouteNode(
-                kind=TripRouteNodeKind.PLACE,
-                location=resolved_location("PLACE_A", "景点 A"),
-                day_number=1,
-            ),
-        ],
+        nodes=[origin, place],
         legs=[
             TripRouteSkeletonLeg(
                 kind=TripRouteLegKind.DAY_START,
-                origin_node_index=0,
-                destination_node_index=1,
+                origin_node_id=origin.node_id,
+                destination_node_id=place.node_id,
             )
         ],
     )
@@ -196,11 +194,12 @@ def test_trip_route_nodes_and_legs_reject_invalid_linkage() -> None:
             location=resolved_location("PLACE_A", "景点 A"),
         )
 
+    repeated_node_id = uuid4()
     with pytest.raises(ValidationError, match="endpoints must be distinct"):
         TripRouteSkeletonLeg(
             kind=TripRouteLegKind.DAY_START,
-            origin_node_index=1,
-            destination_node_index=1,
+            origin_node_id=repeated_node_id,
+            destination_node_id=repeated_node_id,
         )
 
     with pytest.raises(ValidationError, match="existing node"):
@@ -219,8 +218,8 @@ def test_trip_route_nodes_and_legs_reject_invalid_linkage() -> None:
             legs=[
                 TripRouteSkeletonLeg(
                     kind=TripRouteLegKind.DAY_START,
-                    origin_node_index=0,
-                    destination_node_index=2,
+                    origin_node_id=uuid4(),
+                    destination_node_id=uuid4(),
                 )
             ],
         )

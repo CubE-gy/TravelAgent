@@ -3,8 +3,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.schemas.base import ApiRequest
 
-class TripCreate(BaseModel):
+
+class TripCreate(ApiRequest):
     """Validated input required to create a travel plan."""
 
     name: str = Field(min_length=1, max_length=200)
@@ -39,12 +41,13 @@ class TripRead(BaseModel):
     updated_at: datetime
 
 
-class TripUpdate(BaseModel):
+class TripUpdate(ApiRequest):
     """Fields that may be changed on an existing travel plan."""
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
     start_date: date | None = None
     end_date: date | None = None
+    expected_revision: int | None = Field(default=None, ge=0)
 
     @field_validator("name")
     @classmethod
@@ -58,13 +61,16 @@ class TripUpdate(BaseModel):
 
     @model_validator(mode="after")
     def update_must_contain_at_least_one_field(self) -> "TripUpdate":
-        if not self.model_fields_set:
+        mutable_fields = self.model_fields_set - {"expected_revision"}
+        if not mutable_fields:
             raise ValueError("at least one field must be provided")
         null_fields = [
             field_name
-            for field_name in self.model_fields_set
+            for field_name in mutable_fields
             if getattr(self, field_name) is None
         ]
         if null_fields:
             raise ValueError(f"{', '.join(sorted(null_fields))} must not be null")
+        if {"start_date", "end_date"} & mutable_fields and self.expected_revision is None:
+            raise ValueError("expected_revision is required when updating dates")
         return self

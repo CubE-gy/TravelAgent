@@ -37,11 +37,12 @@ class LocalPublicTransportRouteService:
     def resolve(self, skeleton: TripRouteSkeleton) -> list[LocalPublicTransportRouteFact]:
         """Query each local leg in skeleton order and propagate map-service failures."""
         route_facts: list[LocalPublicTransportRouteFact] = []
+        nodes_by_id = {node.node_id: node for node in skeleton.nodes}
         for leg in skeleton.legs:
             if leg.kind in self._INTERCITY_LEG_KINDS:
                 continue
-            origin = skeleton.nodes[leg.origin_node_index].location
-            destination = skeleton.nodes[leg.destination_node_index].location
+            origin = nodes_by_id[leg.origin_node_id].location
+            destination = nodes_by_id[leg.destination_node_id].location
             self._validate_same_city(origin, destination, leg_kind=leg.kind)
             route_facts.append(
                 LocalPublicTransportRouteFact(

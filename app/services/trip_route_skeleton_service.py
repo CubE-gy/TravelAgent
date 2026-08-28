@@ -253,21 +253,22 @@ class TripRouteSkeletonService:
         location: ResolvedLocation,
         *,
         day_number: int | None = None,
-    ) -> int:
-        nodes.append(TripRouteNode(kind=kind, location=location, day_number=day_number))
-        return len(nodes) - 1
+    ) -> object:
+        node = TripRouteNode(kind=kind, location=location, day_number=day_number)
+        nodes.append(node)
+        return node.node_id
 
     @staticmethod
     def _append_leg(
         legs: list[TripRouteSkeletonLeg],
         kind: TripRouteLegKind,
-        origin_node_index: int,
-        destination_node_index: int,
+        origin_node_id: object,
+        destination_node_id: object,
     ) -> None:
         legs.append(
             TripRouteSkeletonLeg(
                 kind=kind,
-                origin_node_index=origin_node_index,
-                destination_node_index=destination_node_index,
+                origin_node_id=origin_node_id,
+                destination_node_id=destination_node_id,
             )
         )

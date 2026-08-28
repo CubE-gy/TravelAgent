@@ -12,12 +12,18 @@ from app.services.trip_state_update_service import TripStateUpdateResult
 class FakeUpdater:
     def __init__(self, result: TripStateUpdateResult | Exception) -> None:
         self.result = result
-        self.calls: list[tuple[object, object, str, bool]] = []
+        self.calls: list[tuple[object, object, str, int, bool]] = []
 
     def update(
-        self, session: object, trip_id: object, user_message: str, *, commit: bool = True
+        self,
+        session: object,
+        trip_id: object,
+        user_message: str,
+        *,
+        expected_revision: int,
+        commit: bool = True,
     ) -> TripStateUpdateResult:
-        self.calls.append((session, trip_id, user_message, commit))
+        self.calls.append((session, trip_id, user_message, expected_revision, commit))
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
@@ -68,9 +74,11 @@ def test_handle_updates_state_then_returns_generated_clarification() -> None:
     clarifier = FakeClarifier(clarification)
     session = FakeSession()
 
-    result = TripStateConversationService(updater, clarifier).handle(session, trip_id, "去北京")
+    result = TripStateConversationService(updater, clarifier).handle(
+        session, trip_id, "去北京", expected_revision=0
+    )
 
-    assert updater.calls == [(session, trip_id, "去北京", False)]
+    assert updater.calls == [(session, trip_id, "去北京", 0, False)]
     assert clarifier.calls == [updater_result]
     assert result.state == state
     assert result.assessment == updater_result.assessment
@@ -85,7 +93,9 @@ def test_handle_does_not_generate_clarification_when_state_update_fails() -> Non
     clarifier = FakeClarifier(TripStateClarification())
 
     with pytest.raises(RuntimeError, match="update failed"):
-        TripStateConversationService(updater, clarifier).handle(FakeSession(), uuid4(), "去北京")
+        TripStateConversationService(updater, clarifier).handle(
+            FakeSession(), uuid4(), "去北京", expected_revision=0
+        )
 
     assert clarifier.calls == []
 
@@ -98,7 +108,7 @@ def test_handle_rolls_back_uncommitted_state_when_clarification_fails() -> None:
 
     with pytest.raises(RuntimeError, match="clarification failed"):
         TripStateConversationService(updater, FailingClarifier()).handle(
-            session, uuid4(), "去北京"
+            session, uuid4(), "去北京", expected_revision=0
         )
 
     assert updater.calls[0][-1] is False

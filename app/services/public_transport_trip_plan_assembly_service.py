@@ -1,5 +1,7 @@
 """Assemble a complete Stage 3 public-transport plan from verified facts."""
 
+from uuid import UUID
+
 from app.schemas.trip_public_transport_plan import (
     LocalPublicTransportRouteFact,
     ResolvedPublicTransportPlanningRequest,
@@ -40,6 +42,8 @@ class PublicTransportTripPlanAssemblyService:
         skeleton: TripRouteSkeleton,
         request: ResolvedPublicTransportPlanningRequest,
         local_route_facts: list[LocalPublicTransportRouteFact],
+        *,
+        source_state_revision: int,
     ) -> PublicTransportTripPlan:
         """Return a complete ordered plan only when every skeleton leg has its proper fact."""
         self._validate_request_matches_skeleton(skeleton, request)
@@ -47,13 +51,19 @@ class PublicTransportTripPlanAssemblyService:
         local_facts_by_leg = self._index_local_facts(skeleton, local_route_facts)
 
         plan_legs: list[PublicTransportTripPlanLeg] = []
+        nodes_by_id = {node.node_id: node for node in skeleton.nodes}
         for skeleton_leg in skeleton.legs:
-            origin = skeleton.nodes[skeleton_leg.origin_node_index].location
-            destination = skeleton.nodes[skeleton_leg.destination_node_index].location
+            origin = nodes_by_id[skeleton_leg.origin_node_id].location
+            destination = nodes_by_id[skeleton_leg.destination_node_id].location
+            origin_node_id = skeleton_leg.origin_node_id
+            destination_node_id = skeleton_leg.destination_node_id
             if skeleton_leg.kind is TripRouteLegKind.OUTBOUND_INTERCITY:
                 plan_legs.append(
                     PublicTransportTripPlanLeg(
                         kind=skeleton_leg.kind,
+                        leg_id=skeleton_leg.leg_id,
+                        origin_node_id=origin_node_id,
+                        destination_node_id=destination_node_id,
                         origin=origin,
                         destination=destination,
                         fact_source=TripRouteFactSource.USER_CONFIRMED_INTERCITY,
@@ -64,6 +74,9 @@ class PublicTransportTripPlanAssemblyService:
                 plan_legs.append(
                     PublicTransportTripPlanLeg(
                         kind=skeleton_leg.kind,
+                        leg_id=skeleton_leg.leg_id,
+                        origin_node_id=origin_node_id,
+                        destination_node_id=destination_node_id,
                         origin=origin,
                         destination=destination,
                         fact_source=TripRouteFactSource.USER_CONFIRMED_INTERCITY,
@@ -75,6 +88,9 @@ class PublicTransportTripPlanAssemblyService:
                 plan_legs.append(
                     PublicTransportTripPlanLeg(
                         kind=skeleton_leg.kind,
+                        leg_id=skeleton_leg.leg_id,
+                        origin_node_id=origin_node_id,
+                        destination_node_id=destination_node_id,
                         origin=origin,
                         destination=destination,
                         fact_source=TripRouteFactSource.AMAP_LOCAL_PUBLIC_TRANSPORT,
@@ -82,7 +98,10 @@ class PublicTransportTripPlanAssemblyService:
                     )
                 )
         return PublicTransportTripPlan(
-            trip_id=skeleton.trip_id, nodes=skeleton.nodes, legs=plan_legs
+            trip_id=skeleton.trip_id,
+            source_state_revision=source_state_revision,
+            nodes=skeleton.nodes,
+            legs=plan_legs,
         )
 
     def _validate_request_matches_skeleton(
@@ -118,8 +137,9 @@ class PublicTransportTripPlanAssemblyService:
                 f"route skeleton must contain exactly one {leg_kind.value} leg"
             )
         matching_leg = matching_legs[0]
-        origin = skeleton.nodes[matching_leg.origin_node_index].location
-        destination = skeleton.nodes[matching_leg.destination_node_index].location
+        nodes_by_id = {node.node_id: node for node in skeleton.nodes}
+        origin = nodes_by_id[matching_leg.origin_node_id].location
+        destination = nodes_by_id[matching_leg.destination_node_id].location
         if (
             origin.poi_id != expected_origin_poi_id
             or destination.poi_id != expected_destination_poi_id
@@ -132,15 +152,13 @@ class PublicTransportTripPlanAssemblyService:
         self,
         skeleton: TripRouteSkeleton,
         local_route_facts: list[LocalPublicTransportRouteFact],
-    ) -> dict[tuple[TripRouteLegKind, int, int], LocalPublicTransportRouteFact]:
+    ) -> dict[UUID, LocalPublicTransportRouteFact]:
         expected_keys = {
             self._leg_key(leg)
             for leg in skeleton.legs
             if leg.kind not in self._INTERCITY_LEG_KINDS
         }
-        facts_by_leg: dict[
-            tuple[TripRouteLegKind, int, int], LocalPublicTransportRouteFact
-        ] = {}
+        facts_by_leg: dict[UUID, LocalPublicTransportRouteFact] = {}
         for route_fact in local_route_facts:
             if route_fact.trip_id != skeleton.trip_id:
                 raise PublicTransportTripPlanAssemblyError(
@@ -163,5 +181,5 @@ class PublicTransportTripPlanAssemblyService:
         return facts_by_leg
 
     @staticmethod
-    def _leg_key(leg: TripRouteSkeletonLeg) -> tuple[TripRouteLegKind, int, int]:
-        return (leg.kind, leg.origin_node_index, leg.destination_node_index)
+    def _leg_key(leg: TripRouteSkeletonLeg) -> UUID:
+        return leg.leg_id

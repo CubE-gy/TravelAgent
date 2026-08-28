@@ -27,6 +27,18 @@ class FakeMapService:
         return self.resolved_location
 
 
+class FakeSession:
+    def __init__(self) -> None:
+        self.commit_calls = 0
+        self.rollback_calls = 0
+
+    def commit(self) -> None:
+        self.commit_calls += 1
+
+    def rollback(self) -> None:
+        self.rollback_calls += 1
+
+
 def _candidate(poi_id: str, name: str) -> PoiCandidate:
     return PoiCandidate(
         poi_id=poi_id,
@@ -65,14 +77,16 @@ def test_confirmation_resolves_and_persists_only_selected_existing_candidate(
     )
     monkeypatch.setattr(
         "app.services.trip_state_location_confirmation_service.save_trip_state",
-        lambda session, saved_state: saved_states.append(saved_state) or saved_state,
+        lambda session, saved_state, **kwargs: saved_states.append(saved_state) or saved_state,
     )
 
+    session = FakeSession()
     persisted, assessment = TripStateLocationConfirmationService(map_service).confirm(
-        object(),
+        session,
         state.trip_id,
         field=TripStateLocationField.DESTINATION,
         selected_poi_id="B000A2",
+        expected_revision=0,
     )
 
     assert persisted.destination is not None
@@ -82,8 +96,40 @@ def test_confirmation_resolves_and_persists_only_selected_existing_candidate(
     assert assessment.pending_locations == []
     assert map_service.resolve_calls == ["B000A2"]
     assert saved_states == [persisted]
+    assert session.commit_calls == 1
     assert state.destination is not None
     assert state.destination.resolution_status is LocationResolutionStatus.AMBIGUOUS
+
+
+def test_confirmation_returns_the_incremented_persisted_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _ambiguous_state().model_copy(update={"revision": 1})
+    map_service = FakeMapService(
+        ResolvedLocation(
+            poi_id="B000A2",
+            name="上海万达广场",
+            coordinate={"latitude": 31.2, "longitude": 121.5},
+        )
+    )
+    monkeypatch.setattr(
+        "app.services.trip_state_location_confirmation_service.get_trip_state",
+        lambda session, trip_id: state,
+    )
+    monkeypatch.setattr(
+        "app.services.trip_state_location_confirmation_service.save_trip_state",
+        lambda session, saved_state, **kwargs: saved_state.model_copy(update={"revision": 2}),
+    )
+
+    persisted, _ = TripStateLocationConfirmationService(map_service).confirm(
+        FakeSession(),
+        state.trip_id,
+        field=TripStateLocationField.DESTINATION,
+        selected_poi_id="B000A2",
+        expected_revision=1,
+    )
+
+    assert persisted.revision == 2
 
 
 def test_confirmation_rejects_candidate_outside_existing_candidates_without_saving(
@@ -106,15 +152,18 @@ def test_confirmation_rejects_candidate_outside_existing_candidates_without_savi
         lambda session, saved_state: pytest.fail("must not save an invalid selection"),
     )
 
+    session = FakeSession()
     with pytest.raises(ValueError, match="must belong"):
         TripStateLocationConfirmationService(map_service).confirm(
-            object(),
+            session,
             state.trip_id,
             field=TripStateLocationField.DESTINATION,
             selected_poi_id="B000MISSING",
+            expected_revision=0,
         )
 
     assert map_service.resolve_calls == []
+    assert session.rollback_calls == 1
 
 
 def test_confirmation_rejects_invalid_place_index_without_map_lookup(
@@ -133,13 +182,16 @@ def test_confirmation_rejects_invalid_place_index_without_map_lookup(
         lambda session, trip_id: state,
     )
 
+    session = FakeSession()
     with pytest.raises(ValueError, match="outside"):
         TripStateLocationConfirmationService(map_service).confirm(
-            object(),
+            session,
             state.trip_id,
             field=TripStateLocationField.PLACES,
             selected_poi_id="B000A2",
             place_index=0,
+            expected_revision=0,
         )
 
     assert map_service.resolve_calls == []
+    assert session.rollback_calls == 1

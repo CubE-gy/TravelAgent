@@ -26,7 +26,7 @@ from app.services.trip_state_extraction_service import TripStateMessageUnderstan
 from app.services.llm_provider import LlmUpstreamError
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _upgrade_test_database(database_url: str) -> None:
@@ -158,10 +158,12 @@ def test_two_messages_restore_and_update_the_same_persisted_trip_state(
             trip_id = UUID(create_response.json()["id"])
 
             first_response = client.post(
-                f"/trips/{trip_id}/messages", json={"message": "我要去北京"}
+                f"/trips/{trip_id}/messages",
+                json={"message": "我要去北京", "expected_revision": 0},
             )
             second_response = client.post(
-                f"/trips/{trip_id}/messages", json={"message": "住王府井附近"}
+                f"/trips/{trip_id}/messages",
+                json={"message": "住王府井附近", "expected_revision": 1},
             )
 
         assert first_response.status_code == 200
@@ -420,7 +422,8 @@ def test_failed_clarification_rolls_back_an_existing_trip_state_update(
             trip_id = UUID(create_response.json()["id"])
 
             response = client.post(
-                f"/trips/{trip_id}/messages", json={"message": "我要去北京"}
+                f"/trips/{trip_id}/messages",
+                json={"message": "我要去北京", "expected_revision": 0},
             )
 
         assert response.status_code == 502

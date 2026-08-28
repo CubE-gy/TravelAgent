@@ -77,8 +77,10 @@ def skeleton(trip_id: object) -> TripRouteSkeleton:
         trip_id=trip_id,
         nodes=nodes,
         legs=[
-            TripRouteSkeletonLeg(
-                kind=kind, origin_node_index=index, destination_node_index=index + 1
+                TripRouteSkeletonLeg(
+                    kind=kind,
+                    origin_node_id=nodes[index].node_id,
+                    destination_node_id=nodes[index + 1].node_id,
             )
             for index, kind in enumerate(kinds)
         ],
@@ -132,9 +134,22 @@ def test_assemble_keeps_complete_skeleton_order_and_fact_sources() -> None:
     route_skeleton = skeleton(trip_id)
 
     plan = PublicTransportTripPlanAssemblyService().assemble(
-        route_skeleton, request(trip_id), local_facts(route_skeleton)
+        route_skeleton,
+        request(trip_id),
+        local_facts(route_skeleton),
+        source_state_revision=1,
     )
 
+    assert plan.source_state_revision == 1
+    assert len({node.node_id for node in plan.nodes}) == len(plan.nodes)
+    assert [leg.leg_id for leg in plan.legs] == [leg.leg_id for leg in route_skeleton.legs]
+    assert [(leg.origin_node_id, leg.destination_node_id) for leg in plan.legs] == [
+        (
+            skeleton_leg.origin_node_id,
+            skeleton_leg.destination_node_id,
+        )
+        for skeleton_leg in route_skeleton.legs
+    ]
     assert [leg.kind for leg in plan.legs] == [leg.kind for leg in route_skeleton.legs]
     assert [leg.fact_source for leg in plan.legs] == [
         TripRouteFactSource.AMAP_LOCAL_PUBLIC_TRANSPORT,
@@ -159,14 +174,26 @@ def test_assemble_rejects_missing_duplicate_or_foreign_local_route_facts() -> No
     service = PublicTransportTripPlanAssemblyService()
 
     with pytest.raises(PublicTransportTripPlanAssemblyError, match="cover every"):
-        service.assemble(route_skeleton, request(trip_id), facts[:-1])
+        service.assemble(
+            route_skeleton, request(trip_id), facts[:-1], source_state_revision=1
+        )
 
     with pytest.raises(PublicTransportTripPlanAssemblyError, match="duplicate"):
-        service.assemble(route_skeleton, request(trip_id), [*facts, facts[0]])
+        service.assemble(
+            route_skeleton,
+            request(trip_id),
+            [*facts, facts[0]],
+            source_state_revision=1,
+        )
 
     foreign_fact = facts[0].model_copy(update={"trip_id": uuid4()})
     with pytest.raises(PublicTransportTripPlanAssemblyError, match="trip_id"):
-        service.assemble(route_skeleton, request(trip_id), [foreign_fact, *facts[1:]])
+        service.assemble(
+            route_skeleton,
+            request(trip_id),
+            [foreign_fact, *facts[1:]],
+            source_state_revision=1,
+        )
 
 
 def test_assemble_rejects_request_with_wrong_intercity_endpoints() -> None:
@@ -179,5 +206,8 @@ def test_assemble_rejects_request_with_wrong_intercity_endpoints() -> None:
 
     with pytest.raises(PublicTransportTripPlanAssemblyError, match="endpoints"):
         PublicTransportTripPlanAssemblyService().assemble(
-            route_skeleton, plan_request, local_facts(route_skeleton)
+            route_skeleton,
+            plan_request,
+            local_facts(route_skeleton),
+            source_state_revision=1,
         )

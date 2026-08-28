@@ -64,6 +64,7 @@ class TripState(BaseModel):
     """The current structured planning state associated with one persisted Trip."""
 
     trip_id: UUID
+    revision: int = Field(default=0, ge=0)
     origin: LocationIntent | None = None
     destination: LocationIntent | None = None
     return_destination: LocationIntent | None = None

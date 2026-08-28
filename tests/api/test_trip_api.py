@@ -20,7 +20,7 @@ from app.schemas.trip_state_assessment import RequiredTripStateField
 from app.services.trip_state_assessor import assess_trip_state
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _upgrade_test_database(database_url: str) -> None:
@@ -71,11 +71,15 @@ def test_create_trip_persists_data_in_test_database() -> None:
         with TestClient(app) as client:
             update_response = client.patch(
                 f"/trips/{created_trip['id']}",
-                json={"name": "更新后的北京五日游", "end_date": "2026-10-06"},
+                json={
+                    "name": "更新后的北京五日游",
+                    "end_date": "2026-10-06",
+                    "expected_revision": 0,
+                },
             )
             invalid_date_response = client.patch(
                 f"/trips/{created_trip['id']}",
-                json={"end_date": "2026-09-30"},
+                json={"end_date": "2026-09-30", "expected_revision": 0},
             )
             missing_update_response = client.patch(
                 f"/trips/{uuid4()}",
@@ -155,7 +159,9 @@ def test_patch_trip_handles_partial_dates_and_syncs_existing_trip_state() -> Non
                     departure_date="2026-10-01",
                     return_date="2026-10-03",
                 ),
+                expected_revision=0,
             )
+            session.commit()
 
         with TestClient(app) as client:
             no_dates_response = client.patch(
@@ -168,13 +174,19 @@ def test_patch_trip_handles_partial_dates_and_syncs_existing_trip_state() -> Non
                 f"/trips/{end_only_trip_id}", json={"name": "仅有返程日"}
             )
             date_sync_response = client.patch(
-                f"/trips/{state_trip_id}", json={"end_date": "2026-10-04"}
+                f"/trips/{state_trip_id}",
+                json={"end_date": "2026-10-04", "expected_revision": 1},
+            )
+            stale_date_response = client.patch(
+                f"/trips/{state_trip_id}",
+                json={"end_date": "2026-10-05", "expected_revision": 1},
             )
             name_only_response = client.patch(
                 f"/trips/{state_trip_id}", json={"name": "仅修改名称"}
             )
             invalid_date_response = client.patch(
-                f"/trips/{state_trip_id}", json={"start_date": "2026-10-05"}
+                f"/trips/{state_trip_id}",
+                json={"start_date": "2026-10-05", "expected_revision": 2},
             )
 
         assert no_dates_response.status_code == 200
@@ -182,6 +194,8 @@ def test_patch_trip_handles_partial_dates_and_syncs_existing_trip_state() -> Non
         assert end_only_response.status_code == 200
         assert date_sync_response.status_code == 200
         assert date_sync_response.json()["end_date"] == "2026-10-04"
+        assert stale_date_response.status_code == 409
+        assert stale_date_response.json() == {"detail": "TripState revision is stale"}
         assert name_only_response.status_code == 200
         assert invalid_date_response.status_code == 422
 

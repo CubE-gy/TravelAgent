@@ -42,6 +42,7 @@ def test_real_amap_public_transport_planning_flow() -> None:
     trip_id = uuid4()
     state = TripState(
         trip_id=trip_id,
+        revision=1,
         origin=_resolved_intent(origin),
         destination=_resolved_intent(accommodation),
         return_destination=_resolved_intent(origin),

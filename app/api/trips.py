@@ -4,16 +4,22 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from app.api.error_mapping import map_map_service_error
 from app.db.session import get_db
 from app.repositories.trip import create_empty_trip, create_trip, get_trip_by_id
-from app.repositories.trip_plan import get_trip_plan, save_trip_plan
-from app.repositories.trip_state import get_trip_state
+from app.repositories.trip_plan import (
+    TripPlanStateRevisionConflictError,
+    get_trip_plan,
+    save_trip_plan,
+)
+from app.repositories.trip_state import TripStateRevisionConflictError, get_trip_state
 from app.schemas.trip_location_confirmation import (
     TripLocationConfirmationCreate,
     TripLocationConfirmationRead,
 )
 from app.schemas.trip_conversation import (
     LocationResolutionFailureRead,
+    TripConversationCreate,
     TripConversationCreateRead,
     TripConversationRead,
     TripMessageCreate,
@@ -22,19 +28,13 @@ from app.schemas.trip import TripCreate, TripRead, TripUpdate
 from app.schemas.trip_public_transport_plan import (
     PublicTransportPlanningRequest,
     PublicTransportTripPlan,
+    PublicTransportTripPlanRead,
 )
 from app.core.config import get_settings
 from app.services.amap_api_service import AmapApiService
 from app.services.llm_provider import LlmConfigurationError, LlmProviderError
 from app.services.llm_provider_factory import create_llm_provider
-from app.services.map_errors import (
-    MapConfigurationError,
-    MapNoResultsError,
-    MapQuotaExceededError,
-    MapServiceError,
-    MapTimeoutError,
-    MapUpstreamError,
-)
+from app.services.map_errors import MapServiceError
 from app.services.public_transport_trip_planning_service import (
     PublicTransportTripPlanningService,
 )
@@ -90,6 +90,7 @@ def _conversation_read(result: TripStateConversationResult) -> TripConversationR
     """Translate the service result without exposing provider or map internals."""
     return TripConversationRead(
         state=result.state,
+        revision=result.state.revision,
         location_failures=[
             LocationResolutionFailureRead(
                 field=failure.field,
@@ -104,9 +105,20 @@ def _conversation_read(result: TripStateConversationResult) -> TripConversationR
     )
 
 
+def _public_transport_plan_read(
+    plan: PublicTransportTripPlan, state: object | None
+) -> PublicTransportTripPlanRead:
+    """Expose freshness without persisting a derived status on the plan snapshot."""
+    state_revision = getattr(state, "revision", None)
+    return PublicTransportTripPlanRead(
+        **plan.model_dump(),
+        stale=state_revision != plan.source_state_revision,
+    )
+
+
 @router.post("/conversations", response_model=TripConversationCreateRead, status_code=status.HTTP_201_CREATED)
 def create_trip_from_first_message_endpoint(
-    trip_message: TripMessageCreate,
+    trip_message: TripConversationCreate,
     session: Session = Depends(get_db),
     conversation_service: TripStateConversationService = Depends(
         get_trip_state_conversation_service
@@ -116,7 +128,11 @@ def create_trip_from_first_message_endpoint(
     trip = create_empty_trip(session)
     try:
         result = conversation_service.handle(
-            session, trip.id, trip_message.message, commit=False
+            session,
+            trip.id,
+            trip_message.message,
+            expected_revision=0,
+            commit=False,
         )
         session.commit()
         session.refresh(trip)
@@ -177,6 +193,12 @@ def update_trip_endpoint(
 
     try:
         return TripUpdateService().update(session, trip, trip_data)
+    except TripStateRevisionConflictError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="TripState revision is stale",
+        ) from error
     except ValueError as error:
         session.rollback()
         raise HTTPException(
@@ -187,7 +209,7 @@ def update_trip_endpoint(
 
 @router.post(
     "/{trip_id}/public-transport-plan",
-    response_model=PublicTransportTripPlan,
+    response_model=PublicTransportTripPlanRead,
     status_code=status.HTTP_201_CREATED,
 )
 def create_public_transport_trip_plan_endpoint(
@@ -197,7 +219,7 @@ def create_public_transport_trip_plan_endpoint(
     planning_service: PublicTransportTripPlanningService = Depends(
         get_public_transport_trip_planning_service
     ),
-) -> PublicTransportTripPlan:
+) -> PublicTransportTripPlanRead:
     """Generate and save the current complete public-transport plan for one Trip."""
     if planning_request.trip_id != trip_id:
         raise HTTPException(
@@ -215,30 +237,26 @@ def create_public_transport_trip_plan_endpoint(
 
     try:
         plan = planning_service.plan(state, planning_request)
-        return save_trip_plan(session, plan)
-    except MapNoResultsError as error:
+        return _public_transport_plan_read(
+            save_trip_plan(
+                session, plan, expected_state_revision=plan.source_state_revision
+            ),
+            state,
+        )
+    except TripPlanStateRevisionConflictError as error:
         session.rollback()
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="No public transport route is available for this plan",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="TripState changed while public transport plan was being generated",
         ) from error
-    except MapTimeoutError as error:
+    except MapServiceError as error:
         session.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Public transport route request timed out",
-        ) from error
-    except (MapConfigurationError, MapQuotaExceededError) as error:
-        session.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Public transport planning service is unavailable",
-        ) from error
-    except (MapUpstreamError, MapServiceError) as error:
-        session.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Public transport map service is unavailable",
+        raise map_map_service_error(
+            error,
+            no_results_detail="No public transport route is available for this plan",
+            unavailable_detail="Public transport planning service is unavailable",
+            timeout_detail="Public transport route request timed out",
+            upstream_detail="Public transport map service is unavailable",
         ) from error
     except ValueError as error:
         session.rollback()
@@ -248,11 +266,11 @@ def create_public_transport_trip_plan_endpoint(
         ) from error
 
 
-@router.get("/{trip_id}/public-transport-plan", response_model=PublicTransportTripPlan)
+@router.get("/{trip_id}/public-transport-plan", response_model=PublicTransportTripPlanRead)
 def get_public_transport_trip_plan_endpoint(
     trip_id: UUID,
     session: Session = Depends(get_db),
-) -> PublicTransportTripPlan:
+) -> PublicTransportTripPlanRead:
     """Return the current saved public-transport plan without regenerating it."""
     if get_trip_by_id(session, trip_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip not found")
@@ -262,7 +280,7 @@ def get_public_transport_trip_plan_endpoint(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Public transport plan has not been generated",
         )
-    return plan
+    return _public_transport_plan_read(plan, get_trip_state(session, trip_id))
 
 
 @router.post("/{trip_id}/messages", response_model=TripConversationRead)
@@ -279,7 +297,18 @@ def handle_trip_message_endpoint(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip not found")
 
     try:
-        result = conversation_service.handle(session, trip_id, trip_message.message)
+        result = conversation_service.handle(
+            session,
+            trip_id,
+            trip_message.message,
+            expected_revision=trip_message.expected_revision,
+        )
+    except TripStateRevisionConflictError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="TripState revision is stale",
+        ) from error
     except LlmConfigurationError as error:
         session.rollback()
         raise HTTPException(
@@ -322,7 +351,13 @@ def confirm_trip_location_endpoint(
             field=confirmation.field,
             selected_poi_id=confirmation.poi_id,
             place_index=confirmation.place_index,
+            expected_revision=confirmation.expected_revision,
         )
+    except TripStateRevisionConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="TripState revision is stale",
+        ) from error
     except LookupError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -334,9 +369,16 @@ def confirm_trip_location_endpoint(
             detail=str(error),
         ) from error
     except MapServiceError as error:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Location confirmation could not be completed",
+        raise map_map_service_error(
+            error,
+            no_results_detail="Location confirmation could not be completed",
+            unavailable_detail="Location confirmation could not be completed",
+            timeout_detail="Location confirmation could not be completed",
+            upstream_detail="Location confirmation could not be completed",
         ) from error
 
-    return TripLocationConfirmationRead(state=state, assessment=assessment)
+    return TripLocationConfirmationRead(
+        state=state,
+        revision=state.revision,
+        assessment=assessment,
+    )

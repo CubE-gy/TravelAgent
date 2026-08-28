@@ -1,5 +1,7 @@
 """One Stage 3 entry point for planning a complete public-transport Trip."""
 
+from typing import Protocol, runtime_checkable
+
 from app.schemas.trip_public_transport_plan import (
     IntercityPublicTransportLeg,
     PublicTransportPlanningRequest,
@@ -22,7 +24,8 @@ from app.services.public_transport_trip_plan_assembly_service import (
 from app.services.trip_route_skeleton_service import TripRouteSkeletonService
 
 
-class PublicTransportTripPlanningMapProvider(LocalPublicTransportRouteProvider):
+@runtime_checkable
+class PublicTransportTripPlanningMapProvider(LocalPublicTransportRouteProvider, Protocol):
     """Stage 1 map capabilities required to confirm nodes and route local legs."""
 
     def resolve_location(self, poi_id: str) -> ResolvedLocation:
@@ -49,7 +52,12 @@ class PublicTransportTripPlanningService:
         skeleton = self._skeleton_service.build(state, resolved_request)
         self._intercity_validator.validate(resolved_request)
         local_route_facts = self._local_route_service.resolve(skeleton)
-        return self._assembly_service.assemble(skeleton, resolved_request, local_route_facts)
+        return self._assembly_service.assemble(
+            skeleton,
+            resolved_request,
+            local_route_facts,
+            source_state_revision=state.revision,
+        )
 
     def _resolve_intercity_nodes(
         self, request: PublicTransportPlanningRequest

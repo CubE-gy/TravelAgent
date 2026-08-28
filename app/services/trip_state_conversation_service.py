@@ -17,7 +17,13 @@ class TripStateUpdater(Protocol):
     """The state-update capability needed by the conversation service."""
 
     def update(
-        self, session: Session, trip_id: UUID, user_message: str, *, commit: bool = True
+        self,
+        session: Session,
+        trip_id: UUID,
+        user_message: str,
+        *,
+        expected_revision: int,
+        commit: bool = True,
     ) -> TripStateUpdateResult: ...
 
 
@@ -45,12 +51,18 @@ class TripStateConversationService:
         self._clarifier = clarifier
 
     def handle(
-        self, session: Session, trip_id: UUID, user_message: str, *, commit: bool = True
+        self,
+        session: Session,
+        trip_id: UUID,
+        user_message: str,
+        *,
+        expected_revision: int,
+        commit: bool = True,
     ) -> TripStateConversationResult:
         """Update one Trip then generate only its required clarification questions."""
         try:
             update_result = self._updater.update(
-                session, trip_id, user_message, commit=False
+                session, trip_id, user_message, expected_revision=expected_revision, commit=False
             )
             clarification = self._clarifier.generate(update_result)
             if commit:

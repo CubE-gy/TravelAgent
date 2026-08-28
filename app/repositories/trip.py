@@ -33,7 +33,9 @@ def update_trip(
     session: Session, trip: Trip, trip_data: TripUpdate, *, commit: bool = True
 ) -> Trip:
     """Apply validated changes to a Trip, optionally inside a caller transaction."""
-    for field_name, value in trip_data.model_dump(exclude_unset=True).items():
+    for field_name, value in trip_data.model_dump(
+        exclude_unset=True, exclude={"expected_revision"}
+    ).items():
         setattr(trip, field_name, value)
 
     if (

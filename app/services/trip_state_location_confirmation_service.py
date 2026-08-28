@@ -4,7 +4,11 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.repositories.trip_state import get_trip_state, save_trip_state
+from app.repositories.trip_state import (
+    TripStateRevisionConflictError,
+    get_trip_state,
+    save_trip_state,
+)
 from app.schemas.trip_state import LocationIntent, TripState, TripStateLocationField
 from app.schemas.trip_state_assessment import TripStateAssessment
 from app.services.location_resolution_service import (
@@ -27,15 +31,33 @@ class TripStateLocationConfirmationService:
         *,
         field: TripStateLocationField,
         selected_poi_id: str,
+        expected_revision: int,
         place_index: int | None = None,
+        commit: bool = True,
     ) -> tuple[TripState, TripStateAssessment]:
         """Resolve the selected candidate and save the replacement TripState."""
-        state = get_trip_state(session, trip_id)
-        if state is None:
-            raise LookupError("TripState not found")
+        try:
+            state = get_trip_state(session, trip_id)
+            if state is None:
+                raise LookupError("TripState not found")
+            if state.revision != expected_revision:
+                raise TripStateRevisionConflictError(
+                    expected_revision=expected_revision,
+                    current_revision=state.revision,
+                )
 
-        confirmed_state = self.apply(state, field, selected_poi_id, place_index)
-        persisted_state = save_trip_state(session, confirmed_state)
+            confirmed_state = self.apply(state, field, selected_poi_id, place_index)
+            persisted_state = save_trip_state(
+                session,
+                confirmed_state,
+                expected_revision=expected_revision,
+            )
+            if commit:
+                session.commit()
+        except Exception:
+            if commit:
+                session.rollback()
+            raise
         return persisted_state, assess_trip_state(persisted_state)
 
     def apply(

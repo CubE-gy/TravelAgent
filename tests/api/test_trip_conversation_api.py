@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app.api.trips import get_trip_state_conversation_service
 from app.db.session import get_db
 from app.main import app
+from app.repositories.trip_state import TripStateRevisionConflictError
 from app.schemas.trip_state import TripState
 from app.schemas.trip_state_assessment import TripStateAssessment
 from app.schemas.trip_state_clarification import TripStateClarification
@@ -19,12 +20,18 @@ from app.services.trip_state_location_resolution_service import LocationResoluti
 class FakeConversationService:
     def __init__(self, result: TripStateConversationResult | Exception) -> None:
         self._result = result
-        self.calls: list[tuple[object, UUID, str]] = []
+        self.calls: list[tuple[object, UUID, str, int, bool]] = []
 
     def handle(
-        self, session: object, trip_id: UUID, user_message: str, *, commit: bool = True
+        self,
+        session: object,
+        trip_id: UUID,
+        user_message: str,
+        *,
+        expected_revision: int,
+        commit: bool = True,
     ) -> TripStateConversationResult:
-        self.calls.append((session, trip_id, user_message, commit))
+        self.calls.append((session, trip_id, user_message, expected_revision, commit))
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
@@ -71,7 +78,7 @@ def client() -> Generator[TestClient, None, None]:
 def _result(
     trip_id: UUID, *, failure_field: str = "destination"
 ) -> TripStateConversationResult:
-    state = TripState(trip_id=trip_id)
+    state = TripState(trip_id=trip_id, revision=1)
     return TripStateConversationResult(
         state=state,
         location_failures=[
@@ -100,12 +107,16 @@ def test_handle_trip_message_returns_state_and_next_questions(
     _override_conversation(service)
     monkeypatch.setattr("app.api.trips.get_trip_by_id", lambda session, identifier: object())
 
-    response = client.post(f"/trips/{trip_id}/messages", json={"message": "  酒店改到国贸附近  "})
+    response = client.post(
+        f"/trips/{trip_id}/messages",
+        json={"message": "  酒店改到国贸附近  ", "expected_revision": 1},
+    )
 
     assert response.status_code == 200
     assert response.json() == {
         "state": {
             "trip_id": str(trip_id),
+            "revision": 1,
             "origin": None,
             "destination": None,
             "return_destination": None,
@@ -117,6 +128,7 @@ def test_handle_trip_message_returns_state_and_next_questions(
             "local_travel_mode": None,
             "vehicle": None,
         },
+        "revision": 1,
         "location_failures": [
             {
                 "field": "destination",
@@ -129,7 +141,7 @@ def test_handle_trip_message_returns_state_and_next_questions(
         "clarification": {"questions": []},
     }
     assert len(service.calls) == 1
-    assert service.calls[0][1:] == (trip_id, "酒店改到国贸附近", True)
+    assert service.calls[0][1:] == (trip_id, "酒店改到国贸附近", 1, True)
 
 
 @pytest.mark.parametrize("message", ["", "   "])
@@ -141,7 +153,10 @@ def test_handle_trip_message_rejects_empty_message(
     _override_conversation(service)
     monkeypatch.setattr("app.api.trips.get_trip_by_id", lambda session, identifier: object())
 
-    response = client.post(f"/trips/{trip_id}/messages", json={"message": message})
+    response = client.post(
+        f"/trips/{trip_id}/messages",
+        json={"message": message, "expected_revision": 1},
+    )
 
     assert response.status_code == 422
     assert service.calls == []
@@ -161,7 +176,7 @@ def test_first_message_creates_trip_and_persists_conversation_atomically(
     assert response.status_code == 201
     assert response.json()["trip"]["id"] == str(trip_id)
     assert response.json()["trip"]["name"] is None
-    assert service.calls[0][1:] == (trip_id, "我要去北京", False)
+    assert service.calls[0][1:] == (trip_id, "我要去北京", 0, False)
 
 
 def test_first_message_returns_origin_location_failures_without_server_error(
@@ -199,7 +214,10 @@ def test_handle_trip_message_rejects_unknown_trip_before_conversation(
     _override_conversation(service)
     monkeypatch.setattr("app.api.trips.get_trip_by_id", lambda session, identifier: None)
 
-    response = client.post(f"/trips/{uuid4()}/messages", json={"message": "去北京"})
+    response = client.post(
+        f"/trips/{uuid4()}/messages",
+        json={"message": "去北京", "expected_revision": 1},
+    )
 
     assert response.status_code == 404
     assert service.calls == []
@@ -213,10 +231,32 @@ def test_handle_trip_message_converts_invalid_state_update_to_422(
     _override_conversation(service)
     monkeypatch.setattr("app.api.trips.get_trip_by_id", lambda session, identifier: object())
 
-    response = client.post(f"/trips/{trip_id}/messages", json={"message": "改坐公共交通"})
+    response = client.post(
+        f"/trips/{trip_id}/messages",
+        json={"message": "改坐公共交通", "expected_revision": 1},
+    )
 
     assert response.status_code == 422
     assert response.json() == {"detail": "Trip conversation update is invalid"}
+
+
+def test_handle_trip_message_rejects_a_stale_revision(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trip_id = uuid4()
+    service = FakeConversationService(
+        TripStateRevisionConflictError(expected_revision=1, current_revision=2)
+    )
+    _override_conversation(service)
+    monkeypatch.setattr("app.api.trips.get_trip_by_id", lambda session, identifier: object())
+
+    response = client.post(
+        f"/trips/{trip_id}/messages",
+        json={"message": "改住国贸附近", "expected_revision": 1},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "TripState revision is stale"}
 
 
 @pytest.mark.parametrize(
@@ -242,15 +282,24 @@ def test_handle_trip_message_converts_provider_errors_without_leaking_details(
     _override_conversation(service)
     monkeypatch.setattr("app.api.trips.get_trip_by_id", lambda session, identifier: object())
 
-    response = client.post(f"/trips/{trip_id}/messages", json={"message": "去北京"})
+    response = client.post(
+        f"/trips/{trip_id}/messages",
+        json={"message": "去北京", "expected_revision": 1},
+    )
 
     assert response.status_code == expected_status
     assert response.json() == {"detail": expected_detail}
 
 
-@pytest.mark.parametrize("path", ["/trips/conversations", f"/trips/{uuid4()}/messages"])
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/trips/conversations", {"message": "我要去北京"}),
+        (f"/trips/{uuid4()}/messages", {"message": "我要去北京", "expected_revision": 1}),
+    ],
+)
 def test_conversation_dependency_converts_llm_configuration_errors_to_503(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str, payload: dict[str, object]
 ) -> None:
     def raise_configuration_error(*args: object, **kwargs: object) -> object:
         del args, kwargs
@@ -258,7 +307,7 @@ def test_conversation_dependency_converts_llm_configuration_errors_to_503(
 
     monkeypatch.setattr("app.api.trips.create_llm_provider", raise_configuration_error)
 
-    response = client.post(path, json={"message": "我要去北京"})
+    response = client.post(path, json=payload)
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Trip conversation service is unavailable"}

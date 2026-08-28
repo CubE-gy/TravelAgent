@@ -6,6 +6,11 @@ from enum import Enum
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.trip_state import TripState, TripStateLocationField, TripStatePatch
+from app.schemas.trip_state_operation import (
+    TripStateLocationConfirmationOperation,
+    TripStateOperation,
+    TripStatePatchOperation,
+)
 from app.services.llm_provider import LlmMessage, LlmMessageRole, LlmProvider
 
 
@@ -114,17 +119,27 @@ class TripStateMessageUnderstanding(BaseModel):
     cleared_fields: list[TripStatePatchField] = Field(default_factory=list)
     location_confirmation: LocationConfirmationIntent | None = None
 
+    def operations(
+        self,
+    ) -> tuple[TripStateOperation, ...]:
+        """Translate LLM output into deterministic State mutation operations."""
+        operations: list[TripStateOperation] = []
+        if self.patch.model_fields_set:
+            operations.append(TripStatePatchOperation(patch=self.patch))
+        if self.location_confirmation is not None:
+            operations.append(
+                TripStateLocationConfirmationOperation(
+                    field=self.location_confirmation.field,
+                    selected_poi_id=self.location_confirmation.selected_poi_id,
+                    place_index=self.location_confirmation.place_index,
+                )
+            )
+        return tuple(operations)
+
     @model_validator(mode="after")
     def strict_schema_nulls_are_not_implicit_clears(self) -> "TripStateMessageUnderstanding":
-        """Keep only actual values and separately declared clears from strict output."""
-        if self.patch.model_fields_set != set(TripStatePatch.model_fields):
-            return self
-
-        patch_data = {
-            field_name: value
-            for field_name, value in self.patch.model_dump().items()
-            if value is not None
-        }
+        """Keep actual values and separately declared clears for every provider shape."""
+        patch_data = self.patch.model_dump(exclude_unset=True, exclude_none=True)
         patch_data.update({field.value: None for field in self.cleared_fields})
         self.patch = TripStatePatch.model_validate(patch_data)
         return self

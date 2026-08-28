@@ -50,3 +50,9 @@ def test_trip_update_normalizes_name() -> None:
 def test_trip_update_rejects_explicit_null(field_name: str) -> None:
     with pytest.raises(ValidationError, match=f"{field_name} must not be null"):
         TripUpdate(**{field_name: None})
+
+
+@pytest.mark.parametrize("field_name", ["start_date", "end_date"])
+def test_trip_update_requires_revision_when_dates_change(field_name: str) -> None:
+    with pytest.raises(ValidationError, match="expected_revision is required"):
+        TripUpdate(**{field_name: date(2026, 10, 1)})
