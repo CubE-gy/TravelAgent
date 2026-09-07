@@ -117,9 +117,11 @@ def test_handle_trip_message_returns_state_and_next_questions(
         "state": {
             "trip_id": str(trip_id),
             "revision": 1,
-            "origin": None,
-            "destination": None,
-            "return_destination": None,
+                "origin": None,
+                "destination": None,
+                "return_destination": None,
+                "outbound_departure_station": None,
+                "outbound_arrival_station": None,
             "departure_date": None,
             "return_date": None,
             "accommodation": None,
@@ -139,6 +141,9 @@ def test_handle_trip_message_returns_state_and_next_questions(
         ],
         "assessment": {"missing_fields": [], "pending_locations": [], "is_ready": True},
         "clarification": {"questions": []},
+        "assistant_message": None,
+        "recommendations": [],
+        "recommendation_session_id": None,
     }
     assert len(service.calls) == 1
     assert service.calls[0][1:] == (trip_id, "酒店改到国贸附近", 1, True)

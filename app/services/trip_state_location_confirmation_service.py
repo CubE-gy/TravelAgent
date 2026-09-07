@@ -92,6 +92,14 @@ class TripStateLocationConfirmationService:
             if state.return_destination is None:
                 raise ValueError("return_destination is not set")
             return state.return_destination
+        if field is TripStateLocationField.OUTBOUND_DEPARTURE_STATION:
+            if state.outbound_departure_station is None:
+                raise ValueError("outbound_departure_station is not set")
+            return state.outbound_departure_station
+        if field is TripStateLocationField.OUTBOUND_ARRIVAL_STATION:
+            if state.outbound_arrival_station is None:
+                raise ValueError("outbound_arrival_station is not set")
+            return state.outbound_arrival_station
         if field is TripStateLocationField.ACCOMMODATION:
             if state.accommodation is None:
                 raise ValueError("accommodation is not set")
@@ -114,6 +122,10 @@ class TripStateLocationConfirmationService:
             return state.model_copy(update={"destination": confirmed_location})
         if field is TripStateLocationField.RETURN_DESTINATION:
             return state.model_copy(update={"return_destination": confirmed_location})
+        if field is TripStateLocationField.OUTBOUND_DEPARTURE_STATION:
+            return state.model_copy(update={"outbound_departure_station": confirmed_location})
+        if field is TripStateLocationField.OUTBOUND_ARRIVAL_STATION:
+            return state.model_copy(update={"outbound_arrival_station": confirmed_location})
         if field is TripStateLocationField.ACCOMMODATION:
             return state.model_copy(update={"accommodation": confirmed_location})
         assert place_index is not None

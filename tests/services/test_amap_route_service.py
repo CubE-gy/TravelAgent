@@ -228,6 +228,39 @@ def test_local_public_transport_allows_missing_segment_durations() -> None:
     assert route.segments[0].duration_seconds is None
 
 
+def test_local_public_transport_keeps_a_single_point_walking_step_without_geometry() -> None:
+    client = FakeMapClient(
+        {
+            "status": "1",
+            "route": {
+                "transits": [
+                    {
+                        "distance": "20",
+                        "cost": {"duration": "30"},
+                        "segments": [
+                            {
+                                "walking": {
+                                    "distance": "20",
+                                    "duration": "30",
+                                    "steps": [{"polyline": "116.3975,39.9042"}],
+                                }
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+    )
+
+    route = AmapRouteService(client).local_public_transport(
+        resolved_location("B000A1", 39.9042, 116.3975),
+        resolved_location("B000A2", 39.9045, 116.3980),
+    )
+
+    assert route.segments[0].mode is RouteSegmentMode.WALKING
+    assert route.segments[0].polyline is None
+
+
 @pytest.mark.parametrize(
     "payload",
     [

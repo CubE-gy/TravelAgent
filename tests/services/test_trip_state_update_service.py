@@ -14,9 +14,13 @@ from app.services.trip_state_update_service import (
     TripStateLocationConfirmer,
     TripStateUpdateService,
 )
+from app.services.llm_provider import LlmResponseError
 from app.services.trip_state_extraction_service import (
+    TripMemoryInstruction,
     LocationConfirmationIntent,
+    TripStateMessageIntent,
     TripStateMessageUnderstanding,
+    TripStateMessageIntent,
 )
 from app.schemas.trip_state import TripStateLocationField
 
@@ -55,7 +59,12 @@ class FakeExtractor:
         self.result = result
         self.calls: list[tuple[TripState, str]] = []
 
-    def extract(self, current_state: TripState, user_message: str) -> TripStateMessageUnderstanding:
+    def extract(
+        self,
+        current_state: TripState,
+        user_message: str,
+        trip_memories: list[dict[str, object]] | None = None,
+    ) -> TripStateMessageUnderstanding:
         self.calls.append((current_state, user_message))
         if isinstance(self.result, Exception):
             raise self.result
@@ -265,6 +274,102 @@ def test_update_returns_the_incremented_persisted_revision(
     )
 
     assert result.state.revision == 2
+
+
+def test_update_returns_a_travel_reply_when_llm_output_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trip_id = uuid4()
+    state = TripState(trip_id=trip_id, revision=1)
+    monkeypatch.setattr(
+        "app.services.trip_state_update_service.get_trip_state",
+        lambda session, requested_trip_id: state,
+    )
+    resolver = FakeLocationResolver(TripStateLocationResolutionResult(state, []))
+
+    result = TripStateUpdateService(
+        FakeExtractor(LlmResponseError("invalid structured output")), resolver
+    ).update(FakeSession(), trip_id, "帮我做个 PPT", expected_revision=1)
+
+    assert result.state == state
+    assert result.assistant_message == "我可以继续帮你处理这趟旅行的地点、酒店、交通和偏好。"
+    assert resolver.calls == []
+
+
+def test_update_persists_explicit_memory_without_re_resolving_locations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trip_id = uuid4()
+    state = TripState(trip_id=trip_id, revision=1)
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        "app.services.trip_state_update_service.get_trip_state",
+        lambda session, requested_trip_id: state,
+    )
+    monkeypatch.setattr(
+        "app.services.trip_state_update_service.upsert_trip_memory",
+        lambda *args: calls.append(args),
+    )
+    resolver = FakeLocationResolver(TripStateLocationResolutionResult(state, []))
+    extractor = FakeExtractor(
+        TripStateMessageUnderstanding(
+            memory_instructions=[
+                TripMemoryInstruction(
+                    action="remember", category="preference", key="hotel", value="安静"
+                )
+            ]
+        )
+    )
+
+    result = TripStateUpdateService(extractor, resolver).update(
+        FakeSession(), trip_id, "我喜欢安静的酒店", expected_revision=1
+    )
+
+    assert result.state is state
+    assert calls[0][2:] == ("preference", "hotel", {"text": "安静"})
+    assert resolver.calls == []
+
+
+def test_conversational_turn_preserves_state_without_map_or_database_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trip_id = uuid4()
+    existing_state = TripState(trip_id=trip_id, revision=3, destination={"query": "南京"})
+    extractor = FakeExtractor(
+        TripStateMessageUnderstanding(
+            intent=TripStateMessageIntent.CONVERSATION,
+            assistant_message="南京可以优先看看中山陵和玄武湖；选定后我再帮你放上地图。",
+        )
+    )
+    resolver = FakeLocationResolver(TripStateLocationResolutionResult(existing_state, []))
+    monkeypatch.setattr("app.services.trip_state_update_service.get_trip_state", lambda session, requested_trip_id: existing_state)
+    save_calls: list[TripState] = []
+    monkeypatch.setattr("app.services.trip_state_update_service.save_trip_state", lambda session, state, **kwargs: save_calls.append(state) or state)
+
+    result = TripStateUpdateService(extractor, resolver).update(
+        FakeSession(), trip_id, "还有什么推荐地方？", expected_revision=3
+    )
+
+    assert result.state == existing_state
+    assert result.assistant_message is not None
+    assert resolver.calls == []
+    assert save_calls == []
+
+
+def test_out_of_scope_turn_preserves_state_without_map_or_database_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trip_id = uuid4()
+    existing_state = TripState(trip_id=trip_id, revision=3)
+    extractor = FakeExtractor(TripStateMessageUnderstanding(intent=TripStateMessageIntent.OUT_OF_SCOPE, assistant_message="我专注于这趟旅行，可以继续帮你补充地点或交通。"))
+    resolver = FakeLocationResolver(TripStateLocationResolutionResult(existing_state, []))
+    monkeypatch.setattr("app.services.trip_state_update_service.get_trip_state", lambda session, requested_trip_id: existing_state)
+    monkeypatch.setattr("app.services.trip_state_update_service.save_trip_state", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not save")))
+
+    result = TripStateUpdateService(extractor, resolver).update(FakeSession(), trip_id, "写一段 Python", expected_revision=3)
+
+    assert result.assistant_message is not None
+    assert resolver.calls == []
 
 
 def test_transport_change_clears_vehicle_then_resolves_and_saves_existing_state(

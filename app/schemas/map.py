@@ -65,5 +65,14 @@ class PoiCandidate(_Poi):
     """A normalized POI offered when a place search has one or more matches."""
 
 
+class ResolvedCity(BaseModel):
+    """An administrative city for map framing, never a routable POI."""
+
+    name: str = Field(min_length=1, max_length=200)
+    adcode: str = Field(pattern=r"^\d{6}$")
+    city_code: str = Field(min_length=1, max_length=50)
+    center: GeoPoint
+
+
 class ResolvedLocation(_Poi):
     """A user-confirmed map location that can be used for route queries."""

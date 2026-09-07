@@ -7,7 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.enums import IntercityTravelMode, TravelMode
-from app.schemas.map import PoiCandidate, ResolvedLocation
+from app.schemas.map import PoiCandidate, ResolvedCity, ResolvedLocation
 from app.schemas.vehicle import Vehicle
 
 
@@ -25,6 +25,8 @@ class TripStateLocationField(str, Enum):
     ORIGIN = "origin"
     DESTINATION = "destination"
     RETURN_DESTINATION = "return_destination"
+    OUTBOUND_DEPARTURE_STATION = "outbound_departure_station"
+    OUTBOUND_ARRIVAL_STATION = "outbound_arrival_station"
     ACCOMMODATION = "accommodation"
     PLACES = "places"
 
@@ -36,6 +38,7 @@ class LocationIntent(BaseModel):
     resolution_status: LocationResolutionStatus = LocationResolutionStatus.UNRESOLVED
     candidates: list[PoiCandidate] = Field(default_factory=list)
     resolved_location: ResolvedLocation | None = None
+    resolved_city: ResolvedCity | None = None
 
     @field_validator("query")
     @classmethod
@@ -48,15 +51,15 @@ class LocationIntent(BaseModel):
     @model_validator(mode="after")
     def map_confirmation_data_must_match_status(self) -> "LocationIntent":
         if self.resolution_status is LocationResolutionStatus.UNRESOLVED:
-            if self.candidates or self.resolved_location is not None:
+            if self.candidates or self.resolved_location is not None or self.resolved_city is not None:
                 raise ValueError("unresolved location must not contain map confirmation data")
         elif self.resolution_status is LocationResolutionStatus.AMBIGUOUS:
-            if len(self.candidates) < 2 or self.resolved_location is not None:
+            if len(self.candidates) < 2 or self.resolved_location is not None or self.resolved_city is not None:
                 raise ValueError(
                     "ambiguous location must contain at least two candidates and no resolved location"
                 )
-        elif self.candidates or self.resolved_location is None:
-            raise ValueError("resolved location must contain no candidates and one resolved location")
+        elif self.candidates or (self.resolved_location is None) == (self.resolved_city is None):
+            raise ValueError("resolved location must contain no candidates and one resolved location or city")
         return self
 
 
@@ -68,6 +71,8 @@ class TripState(BaseModel):
     origin: LocationIntent | None = None
     destination: LocationIntent | None = None
     return_destination: LocationIntent | None = None
+    outbound_departure_station: LocationIntent | None = None
+    outbound_arrival_station: LocationIntent | None = None
     departure_date: date | None = None
     return_date: date | None = None
     accommodation: LocationIntent | None = None
@@ -95,6 +100,8 @@ class TripStatePatch(BaseModel):
     origin: LocationIntent | None = None
     destination: LocationIntent | None = None
     return_destination: LocationIntent | None = None
+    outbound_departure_station: LocationIntent | None = None
+    outbound_arrival_station: LocationIntent | None = None
     departure_date: date | None = None
     return_date: date | None = None
     accommodation: LocationIntent | None = None

@@ -45,6 +45,18 @@ class FailingClarifier:
         raise RuntimeError("clarification failed")
 
 
+class FakeReplyGenerator:
+    def __init__(self, message: str) -> None:
+        self.message = message
+        self.calls: list[tuple[TripStateUpdateResult, TripStateClarification]] = []
+
+    def generate(
+        self, update_result: TripStateUpdateResult, clarification: TripStateClarification
+    ) -> str:
+        self.calls.append((update_result, clarification))
+        return self.message
+
+
 class FakeSession:
     def __init__(self) -> None:
         self.commit_calls = 0
@@ -98,6 +110,48 @@ def test_handle_does_not_generate_clarification_when_state_update_fails() -> Non
         )
 
     assert clarifier.calls == []
+
+
+def test_handle_returns_conversational_reply_without_clarification() -> None:
+    trip_id = uuid4()
+    state = TripState(trip_id=trip_id, revision=2, destination={"query": "南京"})
+    updater = FakeUpdater(
+        TripStateUpdateResult(
+            state=state,
+            location_failures=[],
+            assessment=assess_trip_state(state),
+            assistant_message="南京可以考虑中山陵和玄武湖；你选定后我再放到地图上。",
+        )
+    )
+    clarifier = FakeClarifier(TripStateClarification())
+
+    result = TripStateConversationService(updater, clarifier).handle(
+        FakeSession(), trip_id, "有什么推荐地方？", expected_revision=2
+    )
+
+    assert result.assistant_message is not None
+    assert result.clarification.questions == []
+    assert clarifier.calls == []
+
+
+def test_handle_generates_a_grounded_reply_only_after_tools_execute() -> None:
+    trip_id = uuid4()
+    state = TripState(trip_id=trip_id, destination={"query": "南京"})
+    updater_result = TripStateUpdateResult(
+        state=state,
+        location_failures=[],
+        assessment=assess_trip_state(state),
+        executed_tools=True,
+    )
+    clarification = TripStateClarification()
+    reply_generator = FakeReplyGenerator("已根据地图结果更新行程。")
+
+    result = TripStateConversationService(
+        FakeUpdater(updater_result), FakeClarifier(clarification), reply_generator
+    ).handle(FakeSession(), trip_id, "去南京", expected_revision=0)
+
+    assert reply_generator.calls == [(updater_result, clarification)]
+    assert result.assistant_message == "已根据地图结果更新行程。"
 
 
 def test_handle_rolls_back_uncommitted_state_when_clarification_fails() -> None:

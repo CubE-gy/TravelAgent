@@ -172,6 +172,7 @@ def test_map_errors_propagate_without_mutating_location(error: Exception) -> Non
         "resolution_status": LocationResolutionStatus.UNRESOLVED,
         "candidates": [],
         "resolved_location": None,
+        "resolved_city": None,
     }
     assert service.resolve_calls == []
 

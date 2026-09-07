@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     database_url: PostgresDsn
     test_database_url: PostgresDsn
     amap_web_api_key: SecretStr | None = None
+    frontend_origins: list[str] = ["http://localhost:5173"]
     llm_provider: Literal["mock", "real"] = "mock"
     llm_api_key: SecretStr | None = None
     llm_base_url: str = "https://api.yhlxj.ai/v1"

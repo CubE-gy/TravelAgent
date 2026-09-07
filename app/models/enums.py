@@ -14,6 +14,7 @@ class IntercityTravelMode(str, Enum):
     DRIVING = "driving"
     HIGH_SPEED_RAIL = "high_speed_rail"
     TRAIN = "train"
+    COACH = "coach"
     FLIGHT = "flight"
 
 

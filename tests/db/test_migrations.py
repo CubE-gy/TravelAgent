@@ -10,7 +10,7 @@ from app.db.session import create_database_engine
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-HEAD_REVISION = "0006_add_trip_state_revision"
+HEAD_REVISION = "0007_create_trip_memories"
 
 
 def _alembic_config(database_url: str) -> Config:
@@ -40,8 +40,12 @@ def test_migration_baseline_applies_to_each_database() -> None:
                         ")"
                     )
                 ).scalar_one()
+                trip_memories_exists = connection.execute(
+                    text("SELECT to_regclass('public.trip_memories') IS NOT NULL")
+                ).scalar_one()
         finally:
             engine.dispose()
 
         assert revision == HEAD_REVISION
         assert trip_state_revision_column_exists is True
+        assert trip_memories_exists is True

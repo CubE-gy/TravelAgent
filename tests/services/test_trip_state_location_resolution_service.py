@@ -33,10 +33,14 @@ class FakeLocationMapService:
         return self.resolved_locations[poi_id]
 
 
-def candidate(poi_id: str, name: str) -> PoiCandidate:
+def candidate(
+    poi_id: str, name: str, *, category_code: str | None = None, city_code: str | None = None
+) -> PoiCandidate:
     return PoiCandidate(
         poi_id=poi_id,
         name=name,
+        category_code=category_code,
+        city_code=city_code,
         coordinate={"latitude": 39.9, "longitude": 116.4},
     )
 
@@ -116,3 +120,35 @@ def test_resolve_records_map_failures_and_continues_other_locations() -> None:
     ]
     assert service.search_calls == ["不存在的城市", "暂时不可用的酒店", "故宫"]
     assert service.resolve_calls == ["B000P1"]
+
+
+def test_resolve_offers_multiple_city_rail_stations_for_user_confirmation() -> None:
+    state = TripState(
+        trip_id=uuid4(),
+        origin={
+            "query": "北京", "resolution_status": "resolved",
+            "resolved_city": {"name": "北京市", "adcode": "110000", "city_code": "010", "center": {"latitude": 39.9, "longitude": 116.4}},
+        },
+        destination={
+            "query": "南京", "resolution_status": "resolved",
+            "resolved_city": {"name": "南京市", "adcode": "320100", "city_code": "025", "center": {"latitude": 32.1, "longitude": 118.8}},
+        },
+        intercity_travel_mode="high_speed_rail",
+    )
+    service = FakeLocationMapService(
+        search_results={
+            "北京高铁站": [candidate("BJ-S", "北京南站", category_code="150100", city_code="010"), candidate("BJ-F", "北京丰台站", category_code="150100", city_code="010")],
+            "南京高铁站": [candidate("NJ-S", "南京南站", category_code="150100", city_code="025")],
+        },
+        resolved_locations={"NJ-S": resolved_location("NJ-S", "南京南站")},
+    )
+
+    result = TripStateLocationResolutionService(service).resolve(state)
+
+    assert result.state.outbound_departure_station is not None
+    assert result.state.outbound_departure_station.resolution_status is LocationResolutionStatus.AMBIGUOUS
+    assert [candidate.name for candidate in result.state.outbound_departure_station.candidates] == ["北京南站", "北京丰台站"]
+    assert result.state.outbound_arrival_station is not None
+    assert result.state.outbound_arrival_station.resolved_location is not None
+    assert result.state.outbound_arrival_station.resolved_location.name == "南京南站"
+    assert service.search_calls == ["北京高铁站", "南京高铁站"]

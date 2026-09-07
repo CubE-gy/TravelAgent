@@ -3,7 +3,7 @@ from typing import Any
 from app.models.enums import RouteSegmentMode, TravelMode
 from app.schemas.map import Polyline, ResolvedLocation, Route, RouteSegment
 from app.services.amap_poi_service import JsonMapClient
-from app.services.amap_polyline import parse_amap_polyline
+from app.services.amap_polyline import parse_amap_polyline, parse_amap_polyline_points
 from app.services.map_errors import MapNoResultsError, MapUpstreamError
 
 
@@ -222,9 +222,11 @@ class AmapRouteService:
         for step in steps:
             if not isinstance(step, dict):
                 raise TypeError("walking step must be an object")
-            for point in AmapRouteService._parse_polyline(step.get("polyline")).points:
+            for point in AmapRouteService._parse_polyline_points(step.get("polyline")):
                 if not points or point != points[-1]:
                     points.append(point)
+        if len(points) < 2:
+            return None
         return Polyline(points=points)
 
     @staticmethod
@@ -234,6 +236,14 @@ class AmapRouteService:
         if not isinstance(value, str):
             raise TypeError("polyline must be a string or an object containing a string")
         return parse_amap_polyline(value)
+
+    @staticmethod
+    def _parse_polyline_points(value: object) -> list[object]:
+        if isinstance(value, dict):
+            value = value.get("polyline")
+        if not isinstance(value, str):
+            raise TypeError("polyline must be a string or an object containing a string")
+        return parse_amap_polyline_points(value)
 
     @staticmethod
     def _to_driving_segment(step: object) -> RouteSegment:

@@ -31,8 +31,9 @@ class _ClarificationTopic:
 class TripStateClarificationService:
     """Generate validated Chinese wording for deterministic clarification needs."""
 
-    def __init__(self, provider: LlmProvider) -> None:
+    def __init__(self, provider: LlmProvider, *, workspace_mode: bool = False) -> None:
         self._provider = provider
+        self._workspace_mode = workspace_mode
 
     def generate(self, update_result: TripStateUpdateResult) -> TripStateClarification:
         """Return no questions when ready, otherwise word exactly the required topics."""
@@ -66,6 +67,7 @@ class TripStateClarificationService:
                 instruction=self._missing_instruction(field),
             )
             for field in update_result.assessment.missing_fields
+            if not self._workspace_mode or field is RequiredTripStateField.DESTINATION
         ]
         failures = {
             (failure.field, failure.place_index): failure
@@ -79,11 +81,19 @@ class TripStateClarificationService:
                 topics.append(
                     _ClarificationTopic(
                         topic_id=f"confirm:{pending.field.value}{suffix}",
-                        instruction=f"Ask the user to choose the intended location for {pending.query}.",
+                        instruction=(
+                            f"Ask for one distinguishing clue (full name, district, or address) for {pending.query}. "
+                            "Do not ask the user to identify a correct POI from a list."
+                            if self._workspace_mode else
+                            f"Ask the user to choose the intended location for {pending.query}."
+                        ),
                         candidates=self._candidate_context(location),
                     )
                 )
             else:
+                if self._workspace_mode and failure is not None and failure.error_code != "map_no_results":
+                    # The UI reports an upstream failure; more address detail cannot fix it.
+                    continue
                 error_context = "" if failure is None else f" Map lookup failed with {failure.error_code}."
                 topics.append(
                     _ClarificationTopic(

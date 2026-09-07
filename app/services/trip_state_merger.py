@@ -21,4 +21,8 @@ def merge_trip_state(current_state: TripState, patch: TripStatePatch) -> TripSta
         and "vehicle" not in patch.model_fields_set
     ):
         merged_data["vehicle"] = None
+    if "origin" in patch.model_fields_set or "intercity_travel_mode" in patch.model_fields_set:
+        merged_data["outbound_departure_station"] = None
+    if "destination" in patch.model_fields_set or "intercity_travel_mode" in patch.model_fields_set:
+        merged_data["outbound_arrival_station"] = None
     return TripState.model_validate(merged_data)

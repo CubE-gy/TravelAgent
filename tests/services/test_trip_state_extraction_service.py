@@ -10,7 +10,10 @@ from app.schemas.trip_state_operation import (
 )
 from app.services.llm_provider import LlmMessage, LlmProvider
 from app.services.trip_state_extraction_service import (
+    AgentDecision,
+    AgentScope,
     LocationConfirmationIntent,
+    TripStateMessageIntent,
     TripStatePatchField,
     TripStateExtractionService,
     TripStateMessageUnderstanding,
@@ -64,11 +67,42 @@ def test_extract_sends_current_state_and_user_message_to_provider() -> None:
     assert len(provider.calls) == 1
     messages, response_model = provider.calls[0]
     assert response_model is TripStateMessageUnderstanding
+    assert response_model is AgentDecision
     assert "Do not invent missing information" in messages[0].content
-    assert "城际坐高铁/火车/飞机/自驾" in messages[0].content
+    assert "城际坐高铁/火车/汽车/飞机/自驾" in messages[0].content
     assert "返回原地”" in messages[0].content
     assert '"accommodation":{"query":"王府井附近"' in messages[1].content
     assert messages[1].content.endswith("User message:\n酒店改到国贸附近")
+
+
+def test_extract_includes_current_trip_memories_as_context() -> None:
+    provider = FakePatchProvider(TripStateMessageUnderstanding())
+
+    TripStateExtractionService(provider).extract(
+        TripState(trip_id=uuid4()),
+        "酒店要安静一些",
+        [{"category": "preference", "key": "hotel", "value": {"text": "安静"}}],
+    )
+
+    assert '"category":"preference"' in provider.calls[0][0][1].content
+    assert '"text":"安静"' in provider.calls[0][0][1].content
+
+
+def test_extract_includes_pending_recommendations_as_reference_context() -> None:
+    provider = FakePatchProvider(TripStateMessageUnderstanding(
+        intent=TripStateMessageIntent.CONVERSATION,
+        assistant_message="我会按更高档的条件重新查找。",
+        recommendation_kind="accommodation",
+        recommendation_query="高档酒店",
+    ))
+
+    TripStateExtractionService(provider).extract(
+        TripState(trip_id=uuid4(), destination={"query": "南京"}), "档次高一些",
+        recommendation_context={"kind": "accommodation", "recommendations": [{"kind": "accommodation", "location": {"poi_id": "hotel-1", "name": "普通酒店", "coordinate": {"latitude": 32.0, "longitude": 118.0}}}]},
+    )
+
+    assert '"kind":"accommodation"' in provider.calls[0][0][1].content
+    assert '"name":"普通酒店"' in provider.calls[0][0][1].content
 
 
 def test_extract_returns_empty_patch_when_provider_finds_no_explicit_change() -> None:
@@ -79,6 +113,35 @@ def test_extract_returns_empty_patch_when_provider_finds_no_explicit_change() ->
 
     assert understanding.patch.model_fields_set == set()
     assert understanding.location_confirmation is None
+
+
+def test_extract_keeps_a_conversational_llm_reply_out_of_trip_state_operations() -> None:
+    provider = FakePatchProvider(
+        TripStateMessageUnderstanding(
+            intent=TripStateMessageIntent.CONVERSATION,
+            assistant_message="南京可以考虑中山陵、玄武湖等地点；如果你选中一个，我可以把它放到地图上。",
+        )
+    )
+
+    understanding = TripStateExtractionService(provider).extract(
+        TripState(trip_id=uuid4(), destination={"query": "南京"}), "还有什么推荐地方？"
+    )
+
+    assert understanding.intent is TripStateMessageIntent.CONVERSATION
+    assert understanding.scope is AgentScope.TRAVEL
+    assert understanding.operations() == ()
+    assert len(provider.calls) == 1
+
+
+def test_out_of_scope_decision_is_never_routed_to_travel_tools() -> None:
+    decision = TripStateMessageUnderstanding(
+        intent=TripStateMessageIntent.OUT_OF_SCOPE,
+        assistant_message="我可以继续帮你处理这趟旅行的地点、住宿或交通。",
+    )
+
+    assert decision.scope is AgentScope.OUT_OF_SCOPE
+    assert decision.operations() == ()
+    assert decision.tool_calls == ()
 
 
 def test_understanding_exposes_explicit_operations_in_deterministic_order() -> None:

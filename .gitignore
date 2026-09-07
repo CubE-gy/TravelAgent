@@ -3,5 +3,8 @@
 __pycache__/
 .pytest_cache/
 .env
+web/.env.local
+web/node_modules/
+web/dist/
 *.py[cod]
 *.egg-info/

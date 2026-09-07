@@ -2,13 +2,15 @@
 
 TravelAgent V1 是一个旅行路线规划 Agent。它面向已经有目的地、酒店、景点或交通意向的用户，逐步整合旅行信息，并基于真实地图事实生成、展示和调整可执行路线。
 
-当前已完成 **Stage 3：门到门公共交通完整闭环**。项目在前述工程、地图事实服务和可持久化 `TripState` 基础上，能够根据已确认的地点、用户确认的城际事实和真实高德市内公共交通路线，生成并保存完整的门到门公共交通计划；尚未进入多日地点自动规划、补能规划、正式前端地图或生产部署。
+当前已完成 **Stage 3：门到门公共交通完整闭环**，正在开发 **Stage 4：地图旅行工作台**。Stage 4 以本次确认的地图工作台范围为准：通过连续对话整理地点，在真实地图上建立空间认知；不自动分天、分组、排序或推荐路线。本小步完成不代表 Stage 4 已通过阶段验收。
 
 ## 当前能力
 
 - `GET /health`：服务存活检查。
 - `POST /trips`：创建并持久化一趟旅行。
+- `GET /trips`：读取全部已保存旅行，最近更新的排在前面。
 - `GET /trips/{trip_id}`：读取指定旅行。
+- `GET /trips/{trip_id}/workspace`：读取地图工作台所需的 Trip、TripState 与已保存公共交通计划。
 - `PATCH /trips/{trip_id}`：修改旅行名称或日期。
 - `POST /trips/conversations`：通过首条自然语言消息创建 Trip 与 `TripState`。
 - `POST /trips/{trip_id}/messages`：向既有 Trip 发送一条自然语言补充或修改消息。
@@ -25,7 +27,8 @@ TravelAgent V1 是一个旅行路线规划 Agent。它面向已经有目的地�
 - 支持驾车、步行、公交、地铁、铁路分段及其可用的 Polyline；不对路线做业务决策。
 - 使用 LLM 将每条自然语言消息提取为显式的 `TripState` 增量，并只修改用户本轮明确提及的字段。
 - 持久化出发地、目的地、返程地、日期、住宿、景点、城际/市内交通和车辆等 `TripState` 信息；未提及字段会继续保留。
-- 对地点执行高德标准化：成功时保存确认地点，歧义时返回候选项供用户确认，地图查询失败时保留原始输入并返回可理解的失败信息。
+- 对城市使用高德行政区域查询，独立保存 `resolved_city`（名称、行政区编码、城市编码、中心点）；城市中心只用于地图视野，不能作为具体车站、酒店或门到门路线端点。
+- 对具体地点按已确定的目的地城市搜索高德 POI，结合名称、类型和景点主体匹配自动选点，并通过 POI 详情确认真实坐标；同名门店或弱匹配保留待补充状态，通过对话询问线索。查询失败保留用户输入，不生成虚构标记。
 - 由 Python 确定缺失字段与地点确认需求，再由 LLM 生成简洁中文补问；LLM 的补问结果与需求不一致会被拒绝。
 - 一次对话的状态更新、日期投影与补问生成以同一事务处理；补问或上游调用失败时回滚，避免出现失败响应却已保存状态的情况。
 - `TripState` 是规划日期的唯一事实来源；`Trip.start_date/end_date` 是兼容 Stage 0 API 的镜像字段，日期 PATCH 会在同一事务中同步两者。
@@ -126,6 +129,14 @@ Invoke-RestMethod `
 
 `POST /trips` 成功时返回 `201 Created`。不存在的 Trip 返回 `404`；空名称、空更新或无效日期范围返回 `422`。
 
+### 读取地图工作台
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8000/trips/<trip_id>/workspace"
+```
+
+响应一次返回 `trip`、`state` 和 `public_transport_plan`。尚未创建 `TripState` 或尚未生成公共交通计划时，相应字段为 `null`；仅在 Trip 不存在时返回 `404`。公共交通计划存在时附带 `stale`，表示它是否基于当前 `TripState` revision。
+
 ### 通过对话创建和更新 TripState
 
 ```powershell
@@ -142,7 +153,34 @@ Invoke-RestMethod `
   -Body '{"message":"酒店改到国贸附近，城际改坐飞机，景点只保留故宫。"}'
 ```
 
-响应包含当前 `state`、地点解析失败信息、完整性 `assessment` 与下一轮 `clarification`。当地点存在多个候选项时，使用 `POST /trips/{trip_id}/locations/confirm` 提交候选 `poi_id`，而不是让系统重新猜测地点。
+响应包含当前 `state`、地点解析失败信息、完整性 `assessment` 与下一轮 `clarification`。地图工作台不要求先填齐日期、交通方式等规划信息。明确的城市和可可靠匹配的 POI 自动确认；仍有歧义时通过对话补充线索。原 `POST /trips/{trip_id}/locations/confirm` 接口继续支持显式候选确认，但工作台不默认展示候选选择题。
+
+## Stage 4 对话地图工作台
+
+前端位于 `web/`，使用 React、TypeScript、Vite、Tailwind CSS 和现有 shadcn/ui Button。桌面端左半为连续对话与输入框，右半为高德 JS API 2.0 地图和可展开的地点清单；窄屏上下排列。
+
+在 `web/.env.local` 配置 `VITE_API_BASE_URL`、`VITE_AMAP_JS_API_KEY` 和 `VITE_AMAP_SECURITY_JS_CODE`（参考 `web/.env.example`）。前端使用 JS API Key，后端使用 Web 服务 Key。
+
+```powershell
+cd web
+npm install
+npm run dev
+```
+
+打开 `http://localhost:5173` 可查看已保存的旅行；点击任一旅行继续它的对话地图工作台，或点击“新旅行”开始新的对话。后端默认允许此来源；如果改用 `127.0.0.1` 或其他端口，需要在 `FRONTEND_ORIGINS` 中配置对应的完整来源地址。
+
+验收路径：先输入“我想去南京”，应定位南京城市范围；再输入“我还想去中山陵”，应自动显示景点主体标记。若输入“我从北京坐高铁去，在市内乘公共交通游玩”，系统会为北京和南京分别查询高铁站：单一结果自动标记，多站结果在地点清单中展示候选按钮，点击后确认并更新地图。继续添加明确的酒店和车站，展开清单点击地点检查地图联动，再通过对话删除或纠正地点。每轮成功响应直接更新地图；失败时保留原地点和输入，状态冲突时读取最新状态并提示重试。
+
+TripState 持久化在 PostgreSQL；对话气泡保存在当前浏览器标签页的 `sessionStorage`，同标签页刷新可恢复，未提供跨设备对话历史。刷新时仍从后端读取最新地点，不能以缓存消息替代地图事实。普通提问、状态询问和景点推荐请求由 LLM 直接回复，不修改地图事实；当前推荐不接知识库，不会自动添加地点。
+
+```powershell
+# 在 web/ 下运行
+npm run test
+npm run build
+
+# 在项目根目录运行（真实服务测试会消耗少量调用配额）
+.\.venv\Scripts\python.exe -m pytest -o addopts="" tests/services/test_workspace_smoke.py
+```
 
 ### 创建公共交通计划
 
@@ -267,7 +305,7 @@ TravelAgent/
 | 1 | 高德地图事实层工程化 |
 | 2 | 多轮需求理解 + Trip State Agent |
 | 3 | 门到门公共交通完整闭环 |
-| 4 | 多日地点规划引擎 |
+| 4 | 地图旅行工作台 |
 | 5 | 自驾 + 油车/电车补能规划 |
 | 6 | 用户修改 + 动态重规划 |
 | 7 | 完整产品交互 + 前后端联调 |

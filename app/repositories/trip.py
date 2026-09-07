@@ -1,6 +1,7 @@
 from datetime import date
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.trip import Trip
@@ -27,6 +28,14 @@ def create_empty_trip(session: Session) -> Trip:
 def get_trip_by_id(session: Session, trip_id: UUID) -> Trip | None:
     """Return one Trip by its identifier, if it exists."""
     return session.get(Trip, trip_id)
+
+
+def list_trips(session: Session) -> list[Trip]:
+    """Return saved Trips with the most recently updated first."""
+    statement = select(Trip).order_by(
+        Trip.updated_at.desc(), Trip.created_at.desc(), Trip.id.desc()
+    )
+    return list(session.scalars(statement).all())
 
 
 def update_trip(

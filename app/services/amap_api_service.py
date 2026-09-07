@@ -2,7 +2,8 @@
 
 from pydantic import SecretStr
 
-from app.schemas.map import GeoPoint, PoiCandidate, ResolvedLocation, Route
+from app.schemas.map import GeoPoint, PoiCandidate, ResolvedCity, ResolvedLocation, Route
+from app.services.amap_city_service import AmapCityService
 from app.services.amap_client import AmapWebApiClient
 from app.services.amap_poi_service import AmapPoiService, JsonMapClient
 from app.services.amap_route_service import AmapRouteService
@@ -19,6 +20,7 @@ class AmapApiService:
     ) -> None:
         map_client = client or AmapWebApiClient(api_key)
         self._poi_service = AmapPoiService(map_client)
+        self._city_service = AmapCityService(map_client)
         self._route_service = AmapRouteService(map_client)
 
     def search_pois(
@@ -30,6 +32,9 @@ class AmapApiService:
     def resolve_location(self, poi_id: str) -> ResolvedLocation:
         """Return one confirmed normalized location by POI ID."""
         return self._poi_service.resolve(poi_id)
+
+    def resolve_city(self, query: str) -> ResolvedCity | None:
+        return self._city_service.resolve_city(query)
 
     def search_nearby_pois(
         self,

@@ -6,13 +6,14 @@ from sqlalchemy.orm import Session
 
 from app.api.error_mapping import map_map_service_error
 from app.db.session import get_db
-from app.repositories.trip import create_empty_trip, create_trip, get_trip_by_id
+from app.repositories.trip import create_empty_trip, create_trip, get_trip_by_id, list_trips
 from app.repositories.trip_plan import (
     TripPlanStateRevisionConflictError,
     get_trip_plan,
     save_trip_plan,
 )
 from app.repositories.trip_state import TripStateRevisionConflictError, get_trip_state
+from app.repositories.trip_memory import list_trip_memories
 from app.schemas.trip_location_confirmation import (
     TripLocationConfirmationCreate,
     TripLocationConfirmationRead,
@@ -30,6 +31,8 @@ from app.schemas.trip_public_transport_plan import (
     PublicTransportTripPlan,
     PublicTransportTripPlanRead,
 )
+from app.schemas.trip_workspace import TripWorkspaceRead
+from app.schemas.trip_recommendation import TripRecommendationSelection
 from app.core.config import get_settings
 from app.services.amap_api_service import AmapApiService
 from app.services.llm_provider import LlmConfigurationError, LlmProviderError
@@ -39,6 +42,7 @@ from app.services.public_transport_trip_planning_service import (
     PublicTransportTripPlanningService,
 )
 from app.services.trip_state_clarification_service import TripStateClarificationService
+from app.schemas.trip_state_clarification import TripStateClarification
 from app.services.trip_state_conversation_service import TripStateConversationService
 from app.services.trip_state_conversation_service import TripStateConversationResult
 from app.services.trip_state_extraction_service import TripStateExtractionService
@@ -49,6 +53,9 @@ from app.services.trip_state_location_confirmation_service import (
     TripStateLocationConfirmationService,
 )
 from app.services.trip_state_update_service import TripStateUpdateService
+from app.services.trip_agent_reply_service import TripAgentReplyService
+from app.services.travel_manager_agent import TravelManagerAgent
+from app.services.trip_recommendation_service import TripRecommendationService
 from app.services.trip_update_service import TripUpdateService
 
 
@@ -67,11 +74,24 @@ def get_trip_state_conversation_service() -> TripStateConversationService:
         ) from error
     extractor = TripStateExtractionService(provider)
     amap_service = AmapApiService(settings.amap_web_api_key)
-    location_resolver = TripStateLocationResolutionService(amap_service)
+    location_resolver = TripStateLocationResolutionService(amap_service, city_service=amap_service, auto_select=True)
     location_confirmer = TripStateLocationConfirmationService(amap_service)
-    updater = TripStateUpdateService(extractor, location_resolver, location_confirmer)
-    clarifier = TripStateClarificationService(provider)
-    return TripStateConversationService(updater, clarifier)
+    updater = TripStateUpdateService(
+        extractor, location_resolver, location_confirmer, memory_reader=list_trip_memories
+    )
+    clarifier = TripStateClarificationService(provider, workspace_mode=True)
+    manager_agent = TravelManagerAgent(
+        extractor, TripAgentReplyService(provider)
+    )
+    return TripStateConversationService(
+        updater, clarifier, TripAgentReplyService(provider), manager_agent=manager_agent,
+        recommendation_service=TripRecommendationService(amap_service),
+    )
+
+
+def get_trip_recommendation_service() -> TripRecommendationService:
+    settings = get_settings()
+    return TripRecommendationService(AmapApiService(settings.amap_web_api_key))
 
 
 def get_trip_state_location_confirmation_service() -> TripStateLocationConfirmationService:
@@ -102,7 +122,15 @@ def _conversation_read(result: TripStateConversationResult) -> TripConversationR
         ],
         assessment=result.assessment,
         clarification=result.clarification,
+        assistant_message=result.assistant_message,
+        recommendations=result.recommendations or [],
+        recommendation_session_id=result.recommendation_session_id,
     )
+
+
+def _conversation_context(context: list[object]) -> list[dict[str, str]]:
+    """Pass bounded browser history separately from the current authorization."""
+    return [item.model_dump() for item in context]
 
 
 def _public_transport_plan_read(
@@ -127,13 +155,12 @@ def create_trip_from_first_message_endpoint(
     """Create a Trip and persist its first natural-language state update atomically."""
     trip = create_empty_trip(session)
     try:
-        result = conversation_service.handle(
-            session,
-            trip.id,
-            trip_message.message,
-            expected_revision=0,
-            commit=False,
-        )
+        handle_args = dict(expected_revision=0, commit=False)
+        if trip_message.conversation_context:
+            handle_args["conversation_context"] = _conversation_context(trip_message.conversation_context)
+        if trip_message.recommendation_context is not None:
+            handle_args["recommendation_context"] = trip_message.recommendation_context
+        result = conversation_service.handle(session, trip.id, trip_message.message, **handle_args)
         session.commit()
         session.refresh(trip)
     except LlmConfigurationError as error:
@@ -171,6 +198,12 @@ def create_trip_endpoint(
     return create_trip(session, trip_data)
 
 
+@router.get("", response_model=list[TripRead])
+def list_trips_endpoint(session: Session = Depends(get_db)) -> list[TripRead]:
+    """Return all saved travel plans, newest update first."""
+    return list_trips(session)
+
+
 @router.get("/{trip_id}", response_model=TripRead)
 def get_trip_endpoint(trip_id: UUID, session: Session = Depends(get_db)) -> TripRead:
     """Return one persisted travel plan."""
@@ -178,6 +211,25 @@ def get_trip_endpoint(trip_id: UUID, session: Session = Depends(get_db)) -> Trip
     if trip is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip not found")
     return trip
+
+
+@router.get("/{trip_id}/workspace", response_model=TripWorkspaceRead)
+def get_trip_workspace_endpoint(
+    trip_id: UUID, session: Session = Depends(get_db)
+) -> TripWorkspaceRead:
+    """Return persisted Trip facts needed to restore the Stage 4 map workspace."""
+    trip = get_trip_by_id(session, trip_id)
+    if trip is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip not found")
+    state = get_trip_state(session, trip_id)
+    plan = get_trip_plan(session, trip_id)
+    return TripWorkspaceRead(
+        trip=TripRead.model_validate(trip),
+        state=state,
+        public_transport_plan=(
+            _public_transport_plan_read(plan, state) if plan is not None else None
+        ),
+    )
 
 
 @router.patch("/{trip_id}", response_model=TripRead)
@@ -297,12 +349,12 @@ def handle_trip_message_endpoint(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip not found")
 
     try:
-        result = conversation_service.handle(
-            session,
-            trip_id,
-            trip_message.message,
-            expected_revision=trip_message.expected_revision,
-        )
+        handle_args = dict(expected_revision=trip_message.expected_revision)
+        if trip_message.conversation_context:
+            handle_args["conversation_context"] = _conversation_context(trip_message.conversation_context)
+        if trip_message.recommendation_context is not None:
+            handle_args["recommendation_context"] = trip_message.recommendation_context
+        result = conversation_service.handle(session, trip_id, trip_message.message, **handle_args)
     except TripStateRevisionConflictError as error:
         session.rollback()
         raise HTTPException(
@@ -329,6 +381,44 @@ def handle_trip_message_endpoint(
         ) from error
 
     return _conversation_read(result)
+
+
+@router.post("/{trip_id}/recommendations/select", response_model=TripConversationRead)
+def select_trip_recommendation_endpoint(
+    trip_id: UUID,
+    selection: TripRecommendationSelection,
+    session: Session = Depends(get_db),
+    recommendation_service: TripRecommendationService = Depends(get_trip_recommendation_service),
+) -> TripConversationRead:
+    """Persist the user's explicit click on a real, destination-city POI."""
+    if get_trip_by_id(session, trip_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trip not found")
+    state = get_trip_state(session, trip_id)
+    if state is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="TripState has not been created")
+    try:
+        result = recommendation_service.select(
+            session, trip_id, state, kind=selection.kind, poi_id=selection.poi_id,
+            expected_revision=selection.expected_revision,
+            recommendation_session_id=selection.recommendation_session_id,
+        )
+        session.commit()
+    except TripStateRevisionConflictError as error:
+        session.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="TripState revision is stale") from error
+    except (ValueError, ValidationError) as error:
+        session.rollback()
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error
+    except MapServiceError as error:
+        session.rollback()
+        raise map_map_service_error(error, no_results_detail="Recommendation could not be confirmed",
+            unavailable_detail="Recommendation service is unavailable", timeout_detail="Recommendation request timed out",
+            upstream_detail="Recommendation service is unavailable") from error
+    return _conversation_read(TripStateConversationResult(
+        state=result.state, location_failures=result.location_failures,
+        assessment=result.assessment, clarification=TripStateClarification(),
+        assistant_message="已确认该地点，地图已更新。", recommendations=[],
+    ))
 
 
 @router.post("/{trip_id}/locations/confirm", response_model=TripLocationConfirmationRead)

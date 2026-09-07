@@ -13,6 +13,7 @@ def test_settings_accept_explicit_database_url() -> None:
 
     assert settings.app_env == "development"
     assert settings.amap_web_api_key is None
+    assert settings.frontend_origins == ["http://localhost:5173"]
     assert settings.llm_provider == "mock"
     assert settings.llm_api_key is None
     assert settings.llm_base_url == "https://api.yhlxj.ai/v1"
@@ -33,6 +34,9 @@ def test_settings_reads_environment_variables(monkeypatch: pytest.MonkeyPatch) -
         "postgresql+psycopg://user:password@localhost:5433/travel_agent_test",
     )
     monkeypatch.setenv("AMAP_WEB_API_KEY", "test-amap-key")
+    monkeypatch.setenv(
+        "FRONTEND_ORIGINS", '["http://localhost:5173", "https://travel.example.test"]'
+    )
     monkeypatch.setenv("LLM_PROVIDER", "real")
     monkeypatch.setenv("LLM_API_KEY", "test-llm-key")
     monkeypatch.setenv("LLM_BASE_URL", "https://models.example.test/v1")
@@ -43,6 +47,10 @@ def test_settings_reads_environment_variables(monkeypatch: pytest.MonkeyPatch) -
     assert settings.app_env == "test"
     assert settings.amap_web_api_key is not None
     assert settings.amap_web_api_key.get_secret_value() == "test-amap-key"
+    assert settings.frontend_origins == [
+        "http://localhost:5173",
+        "https://travel.example.test",
+    ]
     assert settings.llm_provider == "real"
     assert settings.llm_api_key is not None
     assert settings.llm_api_key.get_secret_value() == "test-llm-key"

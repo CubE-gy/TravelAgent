@@ -16,7 +16,7 @@ from app.db.session import create_database_engine, get_db
 from app.main import app
 from app.repositories.trip import get_trip_by_id
 from app.repositories.trip_state import get_trip_state
-from app.schemas.map import PoiCandidate, ResolvedLocation
+from app.schemas.map import PoiCandidate, ResolvedCity, ResolvedLocation
 from app.schemas.trip_state import TripStatePatch
 from app.schemas.trip_state_clarification import (
     ClarificationQuestion,
@@ -109,6 +109,12 @@ class FakeAmapApiService:
     def __init__(self, api_key: object) -> None:
         self.api_key = api_key
 
+    def resolve_city(self, query: str) -> ResolvedCity | None:
+        if query != "北京":
+            return None
+        return ResolvedCity(name="北京市", city_code="010", adcode="110000",
+                            center={"latitude": 39.9, "longitude": 116.4})
+
     def search_pois(self, keyword: str, *, region: str | None = None) -> list[PoiCandidate]:
         poi_id = {"北京": "CITY_BEIJING", "王府井附近": "HOTEL_WANGFUJING"}[keyword]
         return [
@@ -168,32 +174,19 @@ def test_two_messages_restore_and_update_the_same_persisted_trip_state(
 
         assert first_response.status_code == 200
         assert first_response.json()["state"]["destination"]["resolution_status"] == "resolved"
-        assert [question["topic_id"] for question in first_response.json()["clarification"]["questions"]] == [
-            "missing:origin",
-            "missing:return_destination",
-            "missing:accommodation",
-            "missing:places",
-            "missing:intercity_travel_mode",
-            "missing:local_travel_mode",
-        ]
+        assert first_response.json()["clarification"]["questions"] == []
         assert second_response.status_code == 200
-        assert second_response.json()["state"]["destination"]["resolved_location"]["name"] == "北京市"
+        assert second_response.json()["state"]["destination"]["resolved_city"]["name"] == "北京市"
         assert second_response.json()["state"]["accommodation"]["resolved_location"]["name"] == "王府井"
-        assert [question["topic_id"] for question in second_response.json()["clarification"]["questions"]] == [
-            "missing:origin",
-            "missing:return_destination",
-            "missing:places",
-            "missing:intercity_travel_mode",
-            "missing:local_travel_mode",
-        ]
+        assert second_response.json()["clarification"]["questions"] == []
 
         with Session(engine) as session:
             persisted_state = get_trip_state(session, trip_id)
 
         assert persisted_state is not None
         assert persisted_state.destination is not None
-        assert persisted_state.destination.resolved_location is not None
-        assert persisted_state.destination.resolved_location.name == "北京市"
+        assert persisted_state.destination.resolved_city is not None
+        assert persisted_state.destination.resolved_city.name == "北京市"
         assert persisted_state.accommodation is not None
         assert persisted_state.accommodation.resolved_location is not None
         assert persisted_state.accommodation.resolved_location.name == "王府井"
@@ -252,6 +245,9 @@ def test_first_natural_language_message_creates_trip_and_state_together(
     class FirstMessageMapService:
         def __init__(self, api_key: object) -> None:
             del api_key
+
+        def resolve_city(self, query: str) -> None:
+            return None
 
         def search_pois(self, keyword: str, *, region: str | None = None) -> list[PoiCandidate]:
             del region
@@ -379,14 +375,19 @@ def test_failed_clarification_rolls_back_an_existing_trip_state_update(
         def __init__(self, api_key: object) -> None:
             del api_key
 
+        def resolve_city(self, query: str) -> None:
+            return None
+
         def search_pois(self, keyword: str, *, region: str | None = None) -> list[PoiCandidate]:
             del keyword, region
             return [
                 PoiCandidate(
                     poi_id="CITY_BEIJING",
-                    name="北京",
+                    name="北京万达广场",
                     coordinate={"latitude": 39.9, "longitude": 116.4},
-                )
+                ),
+                PoiCandidate(poi_id="OTHER_BEIJING", name="北京西站",
+                             coordinate={"latitude": 39.9, "longitude": 116.4}),
             ]
 
         def resolve_location(self, poi_id: str) -> ResolvedLocation:

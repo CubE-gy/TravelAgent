@@ -170,3 +170,18 @@ def test_generate_rejects_missing_duplicate_or_unknown_topics() -> None:
 
     with pytest.raises(LlmResponseError, match="do not match"):
         TripStateClarificationService(provider).generate(update_result(TripState(trip_id=uuid4())))
+
+
+def test_workspace_does_not_require_dates_hotels_transport_or_return_before_showing_map():
+    state = TripState(trip_id=uuid4(), destination=resolved_location("南京", "city-old"))
+    provider = FakeClarificationProvider(TripStateClarification())
+    assert TripStateClarificationService(provider, workspace_mode=True).generate(update_result(state)).questions == []
+    assert provider.calls == []
+
+
+def test_workspace_timeout_does_not_ask_for_more_address_details():
+    state = TripState(trip_id=uuid4(), destination={"query": "南京"})
+    provider = FakeClarificationProvider(TripStateClarification())
+    result = update_result(state, [LocationResolutionFailure(field="destination", query="南京", error_code="map_timeout")])
+    assert TripStateClarificationService(provider, workspace_mode=True).generate(result).questions == []
+    assert provider.calls == []
