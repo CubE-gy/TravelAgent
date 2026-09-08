@@ -48,12 +48,12 @@ class FailingClarifier:
 class FakeReplyGenerator:
     def __init__(self, message: str) -> None:
         self.message = message
-        self.calls: list[tuple[TripStateUpdateResult, TripStateClarification]] = []
+        self.calls: list[tuple[object, TripState, TripStateClarification]] = []
 
     def generate(
-        self, update_result: TripStateUpdateResult, clarification: TripStateClarification
+        self, observation, *, current_state, clarification, **kwargs
     ) -> str:
-        self.calls.append((update_result, clarification))
+        self.calls.append((observation, current_state, clarification))
         return self.message
 
 
@@ -150,7 +150,11 @@ def test_handle_generates_a_grounded_reply_only_after_tools_execute() -> None:
         FakeUpdater(updater_result), FakeClarifier(clarification), reply_generator
     ).handle(FakeSession(), trip_id, "去南京", expected_revision=0)
 
-    assert reply_generator.calls == [(updater_result, clarification)]
+    assert len(reply_generator.calls) == 1
+    observation, observed_state, observed_clarification = reply_generator.calls[0]
+    assert observation.summary == "update_trip_state"
+    assert observed_state is updater_result.state
+    assert observed_clarification is clarification
     assert result.assistant_message == "已根据地图结果更新行程。"
 
 

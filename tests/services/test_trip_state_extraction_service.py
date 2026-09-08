@@ -71,8 +71,10 @@ def test_extract_sends_current_state_and_user_message_to_provider() -> None:
     assert "Do not invent missing information" in messages[0].content
     assert "城际坐高铁/火车/汽车/飞机/自驾" in messages[0].content
     assert "返回原地”" in messages[0].content
-    assert '"accommodation":{"query":"王府井附近"' in messages[1].content
-    assert messages[1].content.endswith("User message:\n酒店改到国贸附近")
+    assert '"accommodation":{"query":"王府井附近"' in messages[0].content
+    assert messages[-1].role.value == "user"
+    assert messages[-1].content == "酒店改到国贸附近"
+    assert "酒店改到国贸附近" not in messages[0].content
 
 
 def test_extract_includes_current_trip_memories_as_context() -> None:
@@ -84,8 +86,8 @@ def test_extract_includes_current_trip_memories_as_context() -> None:
         [{"category": "preference", "key": "hotel", "value": {"text": "安静"}}],
     )
 
-    assert '"category":"preference"' in provider.calls[0][0][1].content
-    assert '"text":"安静"' in provider.calls[0][0][1].content
+    assert '"category":"preference"' in provider.calls[0][0][0].content
+    assert '"text":"安静"' in provider.calls[0][0][0].content
 
 
 def test_extract_includes_pending_recommendations_as_reference_context() -> None:
@@ -101,8 +103,8 @@ def test_extract_includes_pending_recommendations_as_reference_context() -> None
         recommendation_context={"kind": "accommodation", "recommendations": [{"kind": "accommodation", "location": {"poi_id": "hotel-1", "name": "普通酒店", "coordinate": {"latitude": 32.0, "longitude": 118.0}}}]},
     )
 
-    assert '"kind":"accommodation"' in provider.calls[0][0][1].content
-    assert '"name":"普通酒店"' in provider.calls[0][0][1].content
+    assert '"kind":"accommodation"' in provider.calls[0][0][0].content
+    assert '"name":"普通酒店"' in provider.calls[0][0][0].content
 
 
 def test_extract_returns_empty_patch_when_provider_finds_no_explicit_change() -> None:
@@ -260,7 +262,7 @@ def test_extract_returns_only_an_existing_candidate_confirmation_intent() -> Non
 
     assert understanding.patch.model_fields_set == set()
     assert understanding.location_confirmation == expected.location_confirmation
-    assert '"poi_id":"B1"' in provider.calls[0][0][1].content
+    assert '"poi_id":"B1"' in provider.calls[0][0][0].content
 
 
 def test_extract_rejects_blank_user_message_without_calling_provider() -> None:
@@ -271,3 +273,21 @@ def test_extract_rejects_blank_user_message_without_calling_provider() -> None:
         service.extract(TripState(trip_id=uuid4()), "   ")
 
     assert provider.calls == []
+
+
+def test_extract_forwards_structured_turn_facts_into_the_instruction_layer() -> None:
+    provider = SequentialPatchProvider([AgentDecision(intent="conversation", assistant_message="ok")])
+    state = TripState(trip_id=uuid4())
+    turn_facts = [{
+        "turn_index": 1, "user_message": "去南京",
+        "decision": "update_trip_state", "operations": ["apply_patch"],
+        "location_failures": ["places/火星博物馆"], "recommendation_count": 0,
+    }]
+
+    TripStateExtractionService(provider).extract(
+        state, "再加个酒店", turn_facts=turn_facts,
+    )
+
+    system = provider.calls[0][0][0].content
+    assert "最近几轮已执行的操作" in system
+    assert "解析失败 places/火星博物馆" in system

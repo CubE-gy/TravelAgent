@@ -28,9 +28,9 @@ export function saveChat(tripId: string, messages: ChatMessage[]) {
 export function recentConversationContext(messages: ChatMessage[]) {
   const retained: Array<Pick<ChatMessage, "role" | "content">> = [];
   let total = 0;
-  for (const message of messages.slice(-10).reverse()) {
+  for (const message of messages.filter((item) => !item.failed).slice(-10).reverse()) {
     const content = message.content.slice(0, 1000);
-    if (total + content.length > 8000) continue;
+    if (total + content.length > 8000) break;
     retained.push({ role: message.role, content });
     total += content.length;
   }

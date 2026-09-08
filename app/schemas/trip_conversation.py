@@ -35,7 +35,7 @@ class _TripMessage(ApiRequest):
         total = 0
         for item in reversed(self.conversation_context):
             if total + len(item.content) > 8000:
-                continue
+                break
             retained.append(item)
             total += len(item.content)
         self.conversation_context = list(reversed(retained))
@@ -81,7 +81,6 @@ class TripConversationRead(BaseModel):
     clarification: TripStateClarification
     assistant_message: str | None = None
     recommendations: list[TripRecommendationRead] = Field(default_factory=list, max_length=4)
-    recommendation_session_id: UUID | None = None
     recommendation_session_id: UUID | None = None
 
 

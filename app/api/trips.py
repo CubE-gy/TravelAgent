@@ -37,6 +37,8 @@ from app.core.config import get_settings
 from app.services.amap_api_service import AmapApiService
 from app.services.llm_provider import LlmConfigurationError, LlmProviderError
 from app.services.llm_provider_factory import create_llm_provider
+from app.services.llm_call_tracer import TracingLlmProvider
+from app.services.trip_turn_store import TripTurnStore
 from app.services.map_errors import MapServiceError
 from app.services.public_transport_trip_planning_service import (
     PublicTransportTripPlanningService,
@@ -55,6 +57,9 @@ from app.services.trip_state_location_confirmation_service import (
 from app.services.trip_state_update_service import TripStateUpdateService
 from app.services.trip_agent_reply_service import TripAgentReplyService
 from app.services.travel_manager_agent import TravelManagerAgent
+from app.services.travel_tool import SearchRecommendationsTool, UpdateTripStateTool
+from app.services.travel_tool_registry import TravelToolRegistry
+from app.services.validation_retrying_llm_provider import ValidationRetryingLlmProvider
 from app.services.trip_recommendation_service import TripRecommendationService
 from app.services.trip_update_service import TripUpdateService
 
@@ -72,20 +77,26 @@ def get_trip_state_conversation_service() -> TripStateConversationService:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Trip conversation service is unavailable",
         ) from error
-    extractor = TripStateExtractionService(provider)
+    tracing_provider = TracingLlmProvider(provider)
+    retrying_provider = ValidationRetryingLlmProvider(tracing_provider)
+    extractor = TripStateExtractionService(retrying_provider)
     amap_service = AmapApiService(settings.amap_web_api_key)
     location_resolver = TripStateLocationResolutionService(amap_service, city_service=amap_service, auto_select=True)
     location_confirmer = TripStateLocationConfirmationService(amap_service)
     updater = TripStateUpdateService(
         extractor, location_resolver, location_confirmer, memory_reader=list_trip_memories
     )
-    clarifier = TripStateClarificationService(provider, workspace_mode=True)
-    manager_agent = TravelManagerAgent(
-        extractor, TripAgentReplyService(provider)
-    )
+    clarifier = TripStateClarificationService(tracing_provider, workspace_mode=True)
+    recommendation_service = TripRecommendationService(amap_service)
+    tool_registry = TravelToolRegistry([
+        UpdateTripStateTool(updater),
+        SearchRecommendationsTool(recommendation_service),
+    ])
+    reply_generator = TripAgentReplyService(retrying_provider)
+    manager_agent = TravelManagerAgent(extractor, reply_generator, tool_registry)
     return TripStateConversationService(
-        updater, clarifier, TripAgentReplyService(provider), manager_agent=manager_agent,
-        recommendation_service=TripRecommendationService(amap_service),
+        updater, clarifier, reply_generator, manager_agent=manager_agent,
+        turn_store=TripTurnStore(tracing_provider),
     )
 
 

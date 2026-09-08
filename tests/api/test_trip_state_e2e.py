@@ -23,6 +23,7 @@ from app.schemas.trip_state_clarification import (
     TripStateClarification,
 )
 from app.services.trip_state_extraction_service import TripStateMessageUnderstanding
+from app.services.trip_agent_reply_service import AgentFinalReply
 from app.services.llm_provider import LlmUpstreamError
 
 
@@ -100,6 +101,8 @@ class FakeLlmProvider:
             return next(self._extractions)
         if response_model is TripStateClarification:
             return next(self._clarifications)
+        if response_model is AgentFinalReply:
+            return AgentFinalReply(message="已更新行程。")
         raise AssertionError(f"unexpected response model: {response_model}")
 
 
@@ -204,6 +207,10 @@ def test_two_messages_restore_and_update_the_same_persisted_trip_state(
         if trip_id is not None:
             with engine.begin() as connection:
                 connection.execute(
+                    text("DELETE FROM trip_conversation_turns WHERE trip_id = :trip_id"),
+                    {"trip_id": trip_id},
+                )
+                connection.execute(
                     text("DELETE FROM trip_states WHERE trip_id = :trip_id"),
                     {"trip_id": trip_id},
                 )
@@ -240,6 +247,8 @@ def test_first_natural_language_message_creates_trip_and_state_together(
                 )
             if response_model is TripStateClarification:
                 return TripStateClarification()
+            if response_model is AgentFinalReply:
+                return AgentFinalReply(message="已根据地图结果更新行程。")
             raise AssertionError(f"unexpected response model: {response_model}")
 
     class FirstMessageMapService:
@@ -308,6 +317,10 @@ def test_first_natural_language_message_creates_trip_and_state_together(
         if trip_id is not None:
             with engine.begin() as connection:
                 connection.execute(
+                    text("DELETE FROM trip_conversation_turns WHERE trip_id = :trip_id"),
+                    {"trip_id": trip_id},
+                )
+                connection.execute(
                     text("DELETE FROM trip_states WHERE trip_id = :trip_id"),
                     {"trip_id": trip_id},
                 )
@@ -353,50 +366,17 @@ def test_failed_first_natural_language_message_leaves_no_trip(
 
 
 @pytest.mark.integration
-def test_failed_clarification_rolls_back_an_existing_trip_state_update(
+def test_failed_extraction_rolls_back_an_existing_trip_state_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database_url = str(Settings().test_database_url)
     _upgrade_test_database(database_url)
     engine = create_database_engine(database_url)
 
-    class FailingClarificationProvider:
+    class FailingExtractionProvider:
         def generate_structured(self, messages: list[object], response_model: type[object]) -> object:
-            del messages
-            if response_model is TripStateMessageUnderstanding:
-                return TripStateMessageUnderstanding(
-                    patch=TripStatePatch(destination={"query": "北京"})
-                )
-            if response_model is TripStateClarification:
-                raise LlmUpstreamError("clarification unavailable")
-            raise AssertionError(f"unexpected response model: {response_model}")
-
-    class MapService:
-        def __init__(self, api_key: object) -> None:
-            del api_key
-
-        def resolve_city(self, query: str) -> None:
-            return None
-
-        def search_pois(self, keyword: str, *, region: str | None = None) -> list[PoiCandidate]:
-            del keyword, region
-            return [
-                PoiCandidate(
-                    poi_id="CITY_BEIJING",
-                    name="北京万达广场",
-                    coordinate={"latitude": 39.9, "longitude": 116.4},
-                ),
-                PoiCandidate(poi_id="OTHER_BEIJING", name="北京西站",
-                             coordinate={"latitude": 39.9, "longitude": 116.4}),
-            ]
-
-        def resolve_location(self, poi_id: str) -> ResolvedLocation:
-            assert poi_id == "CITY_BEIJING"
-            return ResolvedLocation(
-                poi_id=poi_id,
-                name="北京市",
-                coordinate={"latitude": 39.9, "longitude": 116.4},
-            )
+            del messages, response_model
+            raise LlmUpstreamError("provider unavailable")
 
     def override_get_db() -> Generator[Session, None, None]:
         with Session(engine) as session:
@@ -405,9 +385,8 @@ def test_failed_clarification_rolls_back_an_existing_trip_state_update(
     app.dependency_overrides[get_db] = override_get_db
     monkeypatch.setattr(
         "app.api.trips.create_llm_provider",
-        lambda settings: FailingClarificationProvider(),
+        lambda settings: FailingExtractionProvider(),
     )
-    monkeypatch.setattr("app.api.trips.AmapApiService", MapService)
     trip_id: UUID | None = None
     try:
         with TestClient(app) as client:
@@ -440,6 +419,10 @@ def test_failed_clarification_rolls_back_an_existing_trip_state_update(
         app.dependency_overrides.clear()
         if trip_id is not None:
             with engine.begin() as connection:
+                connection.execute(
+                    text("DELETE FROM trip_conversation_turns WHERE trip_id = :trip_id"),
+                    {"trip_id": trip_id},
+                )
                 connection.execute(
                     text("DELETE FROM trip_states WHERE trip_id = :trip_id"),
                     {"trip_id": trip_id},

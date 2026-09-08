@@ -10,7 +10,7 @@ from app.db.session import create_database_engine
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-HEAD_REVISION = "0007_create_trip_memories"
+HEAD_REVISION = "0009_create_trip_conversation_turns"
 
 
 def _alembic_config(database_url: str) -> Config:
